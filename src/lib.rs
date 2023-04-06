@@ -109,7 +109,7 @@ fn parse_val(input: &str) -> IResult<&str, TomlValue> {
         parse_string,
         parse_boolean,
         parse_array,
-        parse_inline_table,
+        // parse_inline_table,
         parse_date_time,
         parse_float,
         parse_integer,
@@ -170,13 +170,13 @@ fn parse_dot_sep(input: &str) -> IResult<&str, &str> {
 
 /// string = ml-basic-string / basic-string / ml-literal-string / literal-string
 fn parse_string(input: &str) -> IResult<&str, TomlValue> {
-    let (input, str) = alt((
+    let (input, s) = alt((
         parse_ml_basic_string,
         parse_ml_literal_string,
         parse_basic_string,
         parse_literal_string,
     ))(input)?;
-    Ok((input, TomlValue::String(str.to_string())))
+    Ok((input, TomlValue::String(s)))
 }
 
 /// basic-string = quotation-mark *basic-char quotation-mark
@@ -612,12 +612,12 @@ fn parse_local_time(input: &str) -> IResult<&str, &str> {
 ///
 /// array-open =  %x5B ; [
 /// array-close = %x5D ; ]
-fn parse_array(input: &str) -> IResult<&str, TomlValue> {
+pub fn parse_array(input: &str) -> IResult<&str, TomlValue> {
     map(
         delimited(
             tag("["),
             opt(parse_array_values),
-            parse_ws_comment_newline,
+            tuple((parse_ws_comment_newline, tag("]"))),
         ),
         |v| TomlValue::Array(v.unwrap_or_default()),
     )(input)
@@ -1069,6 +1069,90 @@ mod tests {
                     TomlValue::String("red".to_string()),
                     TomlValue::String("yellow".to_string()),
                     TomlValue::String("green".to_string())
+                ])
+            ))
+        );
+        assert_eq!(
+            parse_array("[ [ 1, 2 ], [3, 4, 5] ]"),
+            Ok((
+                "",
+                TomlValue::Array(vec![
+                    TomlValue::Array(vec![
+                        TomlValue::Integer(1),
+                        TomlValue::Integer(2)
+                    ]),
+                    TomlValue::Array(vec![
+                        TomlValue::Integer(3),
+                        TomlValue::Integer(4),
+                        TomlValue::Integer(5)
+                    ])
+                ])
+            ))
+        );
+        assert_eq!(
+            parse_array("[ [ 1, 2 ], [\"a\", \"b\", \"c\"] ]"),
+            Ok((
+                "",
+                TomlValue::Array(vec![
+                    TomlValue::Array(vec![
+                        TomlValue::Integer(1),
+                        TomlValue::Integer(2)
+                    ]),
+                    TomlValue::Array(vec![
+                        TomlValue::String("a".to_string()),
+                        TomlValue::String("b".to_string()),
+                        TomlValue::String("c".to_string())
+                    ])
+                ])
+            ))
+        );
+        assert_eq!(
+            parse_array("[ \"all\", 'strings', \"\"\"are the same\"\"\", '''type''' ]"),
+            Ok((
+                "",
+                TomlValue::Array(vec![
+                    TomlValue::String("all".to_string()),
+                    TomlValue::String("strings".to_string()),
+                    TomlValue::String("are the same".to_string()),
+                    TomlValue::String("type".to_string())
+                ])
+            ))
+        );
+        assert_eq!(
+            parse_array("[ 0.1, 0.2, 0.5, 1, 2, 5 ]"),
+            Ok((
+                "",
+                TomlValue::Array(vec![
+                    TomlValue::Float(0.1),
+                    TomlValue::Float(0.2),
+                    TomlValue::Float(0.5),
+                    TomlValue::Integer(1),
+                    TomlValue::Integer(2),
+                    TomlValue::Integer(5)
+                ])
+            ))
+        );
+        // assert_eq!(
+        //     parse_array("[\n\t\"Foo Bar <foo@example.com>\",\n\t{ name = \"Baz Qux\", email = \"bazqux@example.com\", url = \"https://example.com/bazqux\" }\n]"),
+        // );
+        assert_eq!(
+            parse_array("[\n  1, 2, 3\n]"),
+            Ok((
+                "",
+                TomlValue::Array(vec![
+                    TomlValue::Integer(1),
+                    TomlValue::Integer(2),
+                    TomlValue::Integer(3)
+                ])
+            ))
+        );
+        assert_eq!(
+            parse_array("[\n  1,\n  2, # this is ok\n]"),
+            Ok((
+                "",
+                TomlValue::Array(vec![
+                    TomlValue::Integer(1),
+                    TomlValue::Integer(2)
                 ])
             ))
         );
