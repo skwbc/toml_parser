@@ -17,7 +17,7 @@ pub enum TomlValue {
     Boolean(bool),
     Datetime(String), // TODO: DateTime 型にする
     Array(Vec<TomlValue>),
-    Table(Vec<(String, TomlValue)>),
+    Table(HashMap<String, TomlValue>),
 }
 
 /// toml = expression *( newline expression )
@@ -109,7 +109,7 @@ fn parse_val(input: &str) -> IResult<&str, TomlValue> {
         parse_string,
         parse_boolean,
         parse_array,
-        // parse_inline_table,
+        parse_inline_table,
         parse_date_time,
         parse_float,
         parse_integer,
@@ -666,11 +666,29 @@ fn parse_table(input: &str) -> IResult<&str, (String, TomlValue)> {
 /// inline-table-open  = %x7B  ; {
 /// inline-table-close = %x7D  ; }
 /// inline-table-sep   = %x2C  ; , Comma
-///
+fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
+    map(
+        delimited(
+            tag("{"),
+            opt(parse_inline_table_keyvals),
+            tuple((parse_ws_comment_newline, tag("}"))),
+        ),
+        |t| TomlValue::Table(t.unwrap_or_default()),
+    )(input)
+}
+
 /// inline-table-keyvals =  ws-comment-newline keyval ws-comment-newline inline-table-sep inline-table-keyvals
 /// inline-table-keyvals =/ ws-comment-newline keyval ws-comment-newline [ inline-table-sep ]
-fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
-    todo!()
+fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
+    let parse_inline_table_keyval = delimited(
+        parse_ws_comment_newline,
+        parse_keyval,
+        tuple((parse_ws_comment_newline, opt(tag(",")))),
+    );
+    map(
+        many1(parse_inline_table_keyval),
+        |v| v.into_iter().collect(),
+    )(input)
 }
 
 /// array-table = array-table-open key array-table-close
@@ -1154,6 +1172,50 @@ mod tests {
                     TomlValue::Integer(1),
                     TomlValue::Integer(2)
                 ])
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_inline_table() {
+        assert_eq!(
+            parse_inline_table("{ first = \"Tom\", last = \"Preston-Werner\" }"),
+            Ok((
+                "",
+                TomlValue::Table(
+                    vec![
+                        ("first".to_string(), TomlValue::String("Tom".to_string())),
+                        ("last".to_string(), TomlValue::String("Preston-Werner".to_string()))
+                    ].into_iter().collect()
+                )
+            ))
+        );
+        assert_eq!(
+            parse_inline_table("{ x = 1, y = 2 }"),
+            Ok((
+                "",
+                TomlValue::Table(
+                    vec![
+                        ("x".to_string(), TomlValue::Integer(1)),
+                        ("y".to_string(), TomlValue::Integer(2))
+                    ].into_iter().collect()
+                )
+            ))
+        );
+        assert_eq!(
+            parse_inline_table("{ type.name = \"pug\" }"),
+            Ok((
+                "",
+                TomlValue::Table(
+                    vec![(
+                        "type".to_string(),
+                        TomlValue::Table(
+                            vec![
+                                ("name".to_string(), TomlValue::String("pug".to_string()))
+                            ].into_iter().collect()
+                        )
+                    )].into_iter().collect()
+                )
             ))
         );
     }
