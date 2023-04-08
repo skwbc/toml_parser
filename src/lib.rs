@@ -16,7 +16,7 @@ enum TomlKey {
     DottedKey(Vec<String>),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub enum TomlValue {
     String(String),
     Integer(i64),
@@ -32,21 +32,44 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     let (input, kv) = parse_expression(input)?;
     let (input, vec_kv) = many0(preceded(parse_newline, parse_expression))(input)?;
 
-    // HashMapに変換して返す
-    let mut output = HashMap::new();
-    if let Some(kv) = kv {
-        output.insert(kv.0, kv.1);
-    }
+    let mut toml = match kv {
+        Some(kv) => kv,
+        None => HashMap::new(),
+    };
     for kv in vec_kv.into_iter().flatten() {
-        output.insert(kv.0, kv.1);
+        toml = merge_maps(toml, kv);
     }
-    Ok((input, output))
+    Ok((input, toml))
+}
+
+pub fn merge_maps(
+    mut acc: HashMap<String, TomlValue>,
+    map: HashMap<String, TomlValue>,
+) -> HashMap<String, TomlValue> {
+    for (k, v) in map {
+        match (acc.remove(&k), v) {
+            (Some(TomlValue::Table(t1)), TomlValue::Table(t2)) => {
+                // kがaccに存在する場合、両者がTableの場合は再帰的にマージする
+                let t = merge_maps(t1, t2);
+                acc.insert(k, TomlValue::Table(t));
+            }
+            (Some(_), _) => {
+                // 少なくとも一方がTableでない場合はエラーとする
+                panic!("key {} is already defined", k);
+            }
+            (None, v) => {
+                // kがaccに存在しない場合は、単純に挿入すればよい
+                acc.insert(k, v);
+            }
+        }
+    }
+    acc
 }
 
 /// expression =  ws [ comment ]
 /// expression =/ ws keyval ws [ comment ]
 /// expression =/ ws table ws [ comment ]
-fn parse_expression(input: &str) -> IResult<&str, Option<(String, TomlValue)>> {
+fn parse_expression(input: &str) -> IResult<&str, Option<HashMap<String, TomlValue>>> {
     let (input, _) = parse_ws(input)?;
     let r_keyval = parse_keyval(input);
     let r_table = parse_table(input);
@@ -92,26 +115,26 @@ fn parse_comment(input: &str) -> IResult<&str, &str> {
 }
 
 /// keyval = key keyval-sep val
-fn parse_keyval(input: &str) -> IResult<&str, (String, TomlValue)> {
+fn parse_keyval(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     match parse_key(input)? {
         (input, TomlKey::SimpleKey(key)) => {
             let (input, _) = parse_keyval_sep(input)?;
             let (input, val) = parse_val(input)?;
-            Ok((input, (key, val)))
+            let mut m = HashMap::new();
+            m.insert(key, val);
+            Ok((input, m))
         }
         (input, TomlKey::DottedKey(keys)) => {
             let (input, _) = parse_keyval_sep(input)?;
             let (input, val) = parse_val(input)?;
             let mut m = HashMap::new();
             m.insert(keys.last().unwrap().clone(), val);
-            let key = keys.first().unwrap().clone();
             for key in keys.into_iter().rev().skip(1) {
                 let mut m2 = HashMap::new();
                 m2.insert(key, TomlValue::Table(m));
                 m = m2;
             }
-            let table = m[&key].clone();
-            Ok((input, (key, table)))
+            Ok((input, m))
         }
     }
 }
@@ -677,7 +700,7 @@ fn parse_ws_comment_newline(input: &str) -> IResult<&str, &str> {
 ///
 /// std-table-open  = %x5B ws     ; [ Left square bracket
 /// std-table-close = ws %x5D     ; ] Right square bracket
-fn parse_table(input: &str) -> IResult<&str, (String, TomlValue)> {
+fn parse_table(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     todo!()
 }
 
@@ -706,7 +729,7 @@ fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, Toml
         tuple((parse_ws_comment_newline, opt(tag(",")))),
     );
     map(many1(parse_inline_table_keyval), |v| {
-        v.into_iter().collect()
+        v.into_iter().fold(HashMap::new(), merge_maps)
     })(input)
 }
 
@@ -723,9 +746,48 @@ fn parse_array_table(input: &str) -> IResult<&str, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::hash::Hash;
-
     use super::*;
+
+    #[test]
+    fn test_merge_maps() {
+        let m1 = HashMap::from([
+            (
+                "a".to_string(),
+                TomlValue::Table(HashMap::from([
+                    ("d".to_string(), TomlValue::Integer(1)),
+                    ("c".to_string(), TomlValue::Integer(2)),
+                ])),
+            ),
+            ("b".to_string(), TomlValue::Integer(2)),
+        ]);
+        let m2 = HashMap::from([
+            (
+                "a".to_string(),
+                TomlValue::Table(HashMap::from([
+                    ("a".to_string(), TomlValue::Integer(3)),
+                    ("b".to_string(), TomlValue::Integer(4)),
+                ])),
+            ),
+            ("c".to_string(), TomlValue::Integer(4)),
+        ]);
+        let m3 = merge_maps(m1, m2);
+        assert_eq!(
+            m3,
+            HashMap::from([
+                (
+                    "a".to_string(),
+                    TomlValue::Table(HashMap::from([
+                        ("a".to_string(), TomlValue::Integer(3)),
+                        ("b".to_string(), TomlValue::Integer(4)),
+                        ("c".to_string(), TomlValue::Integer(2)),
+                        ("d".to_string(), TomlValue::Integer(1)),
+                    ])),
+                ),
+                ("b".to_string(), TomlValue::Integer(2)),
+                ("c".to_string(), TomlValue::Integer(4)),
+            ])
+        );
+    }
 
     #[test]
     fn test_comment() {
