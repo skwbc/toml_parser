@@ -104,7 +104,7 @@ fn parse_keyval(input: &str) -> IResult<&str, (String, TomlValue)> {
             let (input, val) = parse_val(input)?;
             let mut m = HashMap::new();
             m.insert(keys.last().unwrap().clone(), val);
-            let key = keys.last().unwrap().clone();
+            let key = keys.first().unwrap().clone();
             for key in keys.into_iter().rev().skip(1) {
                 let mut m2 = HashMap::new();
                 m2.insert(key, TomlValue::Table(m));
@@ -112,7 +112,6 @@ fn parse_keyval(input: &str) -> IResult<&str, (String, TomlValue)> {
             }
             let table = m[&key].clone();
             Ok((input, (key, table)))
-            // Ok((input, (key, m[&key])))
         }
     }
 }
@@ -687,7 +686,7 @@ fn parse_table(input: &str) -> IResult<&str, (String, TomlValue)> {
 /// inline-table-open  = %x7B  ; {
 /// inline-table-close = %x7D  ; }
 /// inline-table-sep   = %x2C  ; , Comma
-fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
+pub fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
     map(
         delimited(
             tag("{"),
