@@ -213,12 +213,8 @@ fn parse_string(input: &str) -> IResult<&str, TomlValue> {
 // quotation-mark = %x22            ; "
 fn parse_basic_string(input: &str) -> IResult<&str, String> {
     map(
-        delimited(
-            tag("\""),
-            recognize(many0(parse_basic_char)),
-            tag("\"")
-        ),
-        &str::to_string
+        delimited(tag("\""), recognize(many0(parse_basic_char)), tag("\"")),
+        &str::to_string,
     )(input)
 }
 
@@ -290,7 +286,8 @@ pub fn parse_ml_basic_string(input: &str) -> IResult<&str, String> {
 /// ml-basic-body = *mlb-content *( mlb-quotes 1*mlb-content ) [ mlb-quotes ]
 fn parse_ml_basic_body(input: &str) -> IResult<&str, String> {
     let (input, content) = many0(parse_mlb_content)(input)?;
-    let (input, quotes_content) = many0(tuple((parse_mlb_quotes, many1(parse_mlb_content))))(input)?;
+    let (input, quotes_content) =
+        many0(tuple((parse_mlb_quotes, many1(parse_mlb_content))))(input)?;
     let (input, quotes) = opt(parse_mlb_quotes)(input)?;
 
     let mut s = content.join("");
@@ -326,7 +323,7 @@ pub fn parse_mlb_content(input: &str) -> IResult<&str, &str> {
         tag("\\"),
         parse_ws,
         parse_newline,
-        many0(alt((tag(" "), tag("\t"), parse_newline)))
+        many0(alt((tag(" "), tag("\t"), parse_newline))),
     ))(input);
     match result {
         Ok((input, _)) => Ok((input, "")),
@@ -339,12 +336,8 @@ pub fn parse_mlb_content(input: &str) -> IResult<&str, &str> {
 /// apostrophe = %x27 ; ' apostrophe
 fn parse_literal_string(input: &str) -> IResult<&str, String> {
     map(
-        delimited(
-            tag("'"),
-            take_while(is_literal_char),
-            tag("'")
-        ),
-        &str::to_string
+        delimited(tag("'"), take_while(is_literal_char), tag("'")),
+        &str::to_string,
     )(input)
 }
 
@@ -360,11 +353,14 @@ fn is_literal_char(c: char) -> bool {
 ///                     ml-literal-string-delim
 /// ml-literal-string-delim = 3apostrophe
 pub fn parse_ml_literal_string(input: &str) -> IResult<&str, String> {
-    map(delimited(
-        tuple((tag("'''"), opt(parse_newline))),
-        parse_ml_literal_body,
-        tag("'''"),
-    ), &str::to_string)(input)
+    map(
+        delimited(
+            tuple((tag("'''"), opt(parse_newline))),
+            parse_ml_literal_body,
+            tag("'''"),
+        ),
+        &str::to_string,
+    )(input)
 }
 
 /// ml-literal-body = *mll-content *( mll-quotes 1*mll-content ) [ mll-quotes ]
@@ -668,16 +664,11 @@ fn parse_array_values(input: &str) -> IResult<&str, Vec<TomlValue>> {
 
 /// ws-comment-newline = *( wschar / [ comment ] newline )
 fn parse_ws_comment_newline(input: &str) -> IResult<&str, &str> {
-    recognize(
-        many0(
-            alt((
-                recognize(one_of(" \t")),
-                recognize(tuple((opt(parse_comment), parse_newline))),
-            ))
-        )
-    )(input)
+    recognize(many0(alt((
+        recognize(one_of(" \t")),
+        recognize(tuple((opt(parse_comment), parse_newline))),
+    ))))(input)
 }
-
 
 /// table = std-table / array-table
 ///
@@ -715,10 +706,9 @@ fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, Toml
         parse_keyval,
         tuple((parse_ws_comment_newline, opt(tag(",")))),
     );
-    map(
-        many1(parse_inline_table_keyval),
-        |v| v.into_iter().collect(),
-    )(input)
+    map(many1(parse_inline_table_keyval), |v| {
+        v.into_iter().collect()
+    })(input)
 }
 
 /// array-table = array-table-open key array-table-close
@@ -734,6 +724,8 @@ fn parse_array_table(input: &str) -> IResult<&str, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::hash::Hash;
+
     use super::*;
 
     #[test]
@@ -755,41 +747,74 @@ mod tests {
     #[test]
     fn test_key() {
         // unquoted-key
-        assert_eq!(parse_key("key"), Ok(("", TomlKey::SimpleKey("key".to_string()))));
-        assert_eq!(parse_key("bare_key"), Ok(("", TomlKey::SimpleKey("bare_key".to_string()))));
-        assert_eq!(parse_key("bare-key"), Ok(("", TomlKey::SimpleKey("bare-key".to_string()))));
-        assert_eq!(parse_key("1234"), Ok(("", TomlKey::SimpleKey("1234".to_string()))));
+        assert_eq!(
+            parse_key("key"),
+            Ok(("", TomlKey::SimpleKey("key".to_string())))
+        );
+        assert_eq!(
+            parse_key("bare_key"),
+            Ok(("", TomlKey::SimpleKey("bare_key".to_string())))
+        );
+        assert_eq!(
+            parse_key("bare-key"),
+            Ok(("", TomlKey::SimpleKey("bare-key".to_string())))
+        );
+        assert_eq!(
+            parse_key("1234"),
+            Ok(("", TomlKey::SimpleKey("1234".to_string())))
+        );
 
         // quoted-key
-        assert_eq!(parse_key("\"127.0.0.1\""), Ok(("", TomlKey::SimpleKey("127.0.0.1".to_string()))));
+        assert_eq!(
+            parse_key("\"127.0.0.1\""),
+            Ok(("", TomlKey::SimpleKey("127.0.0.1".to_string())))
+        );
         assert_eq!(
             parse_key("\"character encoding\""),
             Ok(("", TomlKey::SimpleKey("character encoding".to_string())))
         );
-        assert_eq!(parse_key("\"ʎǝʞ\""), Ok(("", TomlKey::SimpleKey("ʎǝʞ".to_string()))));
-        assert_eq!(parse_key("'key2'"), Ok(("", TomlKey::SimpleKey("key2".to_string()))));
+        assert_eq!(
+            parse_key("\"ʎǝʞ\""),
+            Ok(("", TomlKey::SimpleKey("ʎǝʞ".to_string())))
+        );
+        assert_eq!(
+            parse_key("'key2'"),
+            Ok(("", TomlKey::SimpleKey("key2".to_string())))
+        );
         assert_eq!(
             parse_key("'quoted \"value\"'"),
             Ok(("", TomlKey::SimpleKey("quoted \"value\"".to_string())))
         );
-        assert_eq!(parse_key("\"\""), Ok(("", TomlKey::SimpleKey("".to_string()))));
-        assert_eq!(parse_key("''"), Ok(("", TomlKey::SimpleKey("".to_string()))));
+        assert_eq!(
+            parse_key("\"\""),
+            Ok(("", TomlKey::SimpleKey("".to_string())))
+        );
+        assert_eq!(
+            parse_key("''"),
+            Ok(("", TomlKey::SimpleKey("".to_string())))
+        );
 
         // dotted-key
-        assert_eq!(parse_key("physical.color"), Ok(("", TomlKey::DottedKey(vec![
-            "physical".to_string(),
-            "color".to_string()
-        ]))));
-        assert_eq!(parse_key("physical.shape"), Ok(("", TomlKey::DottedKey(vec![
-            "physical".to_string(),
-            "shape".to_string()
-        ]))));
+        assert_eq!(
+            parse_key("physical.color"),
+            Ok((
+                "",
+                TomlKey::DottedKey(vec!["physical".to_string(), "color".to_string()])
+            ))
+        );
+        assert_eq!(
+            parse_key("physical.shape"),
+            Ok((
+                "",
+                TomlKey::DottedKey(vec!["physical".to_string(), "shape".to_string()])
+            ))
+        );
         assert_eq!(
             parse_key("site.\"google.com\""),
-            Ok(("", TomlKey::DottedKey(vec![
-                "site".to_string(),
-                "google.com".to_string()
-            ])))
+            Ok((
+                "",
+                TomlKey::DottedKey(vec!["site".to_string(), "google.com".to_string()])
+            ))
         );
     }
 
@@ -819,7 +844,9 @@ mod tests {
             ))
         );
         assert_eq!(
-            parse_string("\"\"\"\nThe quick brown \\\n\n\n  fox jumps over \\\n    the lazy dog.\"\"\""),
+            parse_string(
+                "\"\"\"\nThe quick brown \\\n\n\n  fox jumps over \\\n    the lazy dog.\"\"\""
+            ),
             Ok((
                 "",
                 TomlValue::String("The quick brown fox jumps over the lazy dog.".to_string()),
@@ -857,7 +884,9 @@ mod tests {
             parse_string("\"\"\"\"This,\" she said, \"is just a pointless statement.\"\"\"\""),
             Ok((
                 "",
-                TomlValue::String("\"This,\" she said, \"is just a pointless statement.\"".to_string()),
+                TomlValue::String(
+                    "\"This,\" she said, \"is just a pointless statement.\"".to_string()
+                ),
             ))
         );
     }
@@ -887,10 +916,7 @@ mod tests {
         );
         assert_eq!(
             parse_string("'<\\i\\c*\\s*>'"),
-            Ok((
-                "",
-                TomlValue::String("<\\i\\c*\\s*>".to_string())
-            ))
+            Ok(("", TomlValue::String("<\\i\\c*\\s*>".to_string())))
         );
     }
 
@@ -914,7 +940,9 @@ mod tests {
             parse_string("'''Here are fifteen quotation marks: \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"'''"),
             Ok((
                 "",
-                TomlValue::String("Here are fifteen quotation marks: \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"".to_string()),
+                TomlValue::String(
+                    "Here are fifteen quotation marks: \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"".to_string()
+                ),
             ))
         );
         assert_eq!(
@@ -1129,10 +1157,7 @@ mod tests {
             Ok((
                 "",
                 TomlValue::Array(vec![
-                    TomlValue::Array(vec![
-                        TomlValue::Integer(1),
-                        TomlValue::Integer(2)
-                    ]),
+                    TomlValue::Array(vec![TomlValue::Integer(1), TomlValue::Integer(2)]),
                     TomlValue::Array(vec![
                         TomlValue::Integer(3),
                         TomlValue::Integer(4),
@@ -1146,10 +1171,7 @@ mod tests {
             Ok((
                 "",
                 TomlValue::Array(vec![
-                    TomlValue::Array(vec![
-                        TomlValue::Integer(1),
-                        TomlValue::Integer(2)
-                    ]),
+                    TomlValue::Array(vec![TomlValue::Integer(1), TomlValue::Integer(2)]),
                     TomlValue::Array(vec![
                         TomlValue::String("a".to_string()),
                         TomlValue::String("b".to_string()),
@@ -1184,9 +1206,20 @@ mod tests {
                 ])
             ))
         );
-        // assert_eq!(
-        //     parse_array("[\n\t\"Foo Bar <foo@example.com>\",\n\t{ name = \"Baz Qux\", email = \"bazqux@example.com\", url = \"https://example.com/bazqux\" }\n]"),
-        // );
+        assert_eq!(
+            parse_array("[\n\t\"Foo Bar <foo@example.com>\",\n\t{ name = \"Baz Qux\", email = \"bazqux@example.com\", url = \"https://example.com/bazqux\" }\n]"),
+            Ok((
+                "",
+                TomlValue::Array(vec![
+                    TomlValue::String("Foo Bar <foo@example.com>".to_string()),
+                    TomlValue::Table(HashMap::from([
+                        ("name".to_string(), TomlValue::String("Baz Qux".to_string())),
+                        ("email".to_string(), TomlValue::String("bazqux@example.com".to_string())),
+                        ("url".to_string(), TomlValue::String("https://example.com/bazqux".to_string())),
+                    ]))
+                ])
+            ))
+        );
         assert_eq!(
             parse_array("[\n  1, 2, 3\n]"),
             Ok((
@@ -1202,10 +1235,7 @@ mod tests {
             parse_array("[\n  1,\n  2, # this is ok\n]"),
             Ok((
                 "",
-                TomlValue::Array(vec![
-                    TomlValue::Integer(1),
-                    TomlValue::Integer(2)
-                ])
+                TomlValue::Array(vec![TomlValue::Integer(1), TomlValue::Integer(2)])
             ))
         );
     }
@@ -1216,40 +1246,36 @@ mod tests {
             parse_inline_table("{ first = \"Tom\", last = \"Preston-Werner\" }"),
             Ok((
                 "",
-                TomlValue::Table(
-                    vec![
-                        ("first".to_string(), TomlValue::String("Tom".to_string())),
-                        ("last".to_string(), TomlValue::String("Preston-Werner".to_string()))
-                    ].into_iter().collect()
-                )
+                TomlValue::Table(HashMap::from([
+                    ("first".to_string(), TomlValue::String("Tom".to_string())),
+                    (
+                        "last".to_string(),
+                        TomlValue::String("Preston-Werner".to_string())
+                    )
+                ]))
             ))
         );
         assert_eq!(
             parse_inline_table("{ x = 1, y = 2 }"),
             Ok((
                 "",
-                TomlValue::Table(
-                    vec![
-                        ("x".to_string(), TomlValue::Integer(1)),
-                        ("y".to_string(), TomlValue::Integer(2))
-                    ].into_iter().collect()
-                )
+                TomlValue::Table(HashMap::from([
+                    ("x".to_string(), TomlValue::Integer(1)),
+                    ("y".to_string(), TomlValue::Integer(2))
+                ]))
             ))
         );
         assert_eq!(
             parse_inline_table("{ type.name = \"pug\" }"),
             Ok((
                 "",
-                TomlValue::Table(
-                    vec![(
-                        "type".to_string(),
-                        TomlValue::Table(
-                            vec![
-                                ("name".to_string(), TomlValue::String("pug".to_string()))
-                            ].into_iter().collect()
-                        )
-                    )].into_iter().collect()
-                )
+                TomlValue::Table(HashMap::from([(
+                    "type".to_string(),
+                    TomlValue::Table(HashMap::from([(
+                        "name".to_string(),
+                        TomlValue::String("pug".to_string())
+                    )]))
+                )]))
             ))
         );
     }
