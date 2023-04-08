@@ -8,8 +8,15 @@ use nom::{
     IResult,
 };
 use std::collections::HashMap;
+use std::iter;
 
 #[derive(Debug, PartialEq)]
+enum TomlKey {
+    SimpleKey(String),
+    DottedKey(Vec<String>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum TomlValue {
     String(String),
     Integer(i64),
@@ -86,11 +93,28 @@ fn parse_comment(input: &str) -> IResult<&str, &str> {
 
 /// keyval = key keyval-sep val
 fn parse_keyval(input: &str) -> IResult<&str, (String, TomlValue)> {
-    // ToDo: keyがsimple-keyかdotted-keyかによって処理を分ける必要がある
-    let (input, key) = parse_key(input)?;
-    let (input, _) = parse_keyval_sep(input)?;
-    let (input, val) = parse_val(input)?;
-    Ok((input, (key, val)))
+    match parse_key(input)? {
+        (input, TomlKey::SimpleKey(key)) => {
+            let (input, _) = parse_keyval_sep(input)?;
+            let (input, val) = parse_val(input)?;
+            Ok((input, (key, val)))
+        }
+        (input, TomlKey::DottedKey(keys)) => {
+            let (input, _) = parse_keyval_sep(input)?;
+            let (input, val) = parse_val(input)?;
+            let mut m = HashMap::new();
+            m.insert(keys.last().unwrap().clone(), val);
+            let key = keys.last().unwrap().clone();
+            for key in keys.into_iter().rev().skip(1) {
+                let mut m2 = HashMap::new();
+                m2.insert(key, TomlValue::Table(m));
+                m = m2;
+            }
+            let table = m[&key].clone();
+            Ok((input, (key, table)))
+            // Ok((input, (key, m[&key])))
+        }
+    }
 }
 
 // keyval-sep = ws %x3D ws ; =
@@ -99,7 +123,7 @@ fn parse_keyval_sep(input: &str) -> IResult<&str, &str> {
 }
 
 /// key = simple-key / dotted-key
-fn parse_key(input: &str) -> IResult<&str, String> {
+fn parse_key(input: &str) -> IResult<&str, TomlKey> {
     alt((parse_dotted_key, parse_simple_key))(input)
 }
 
@@ -117,7 +141,13 @@ fn parse_val(input: &str) -> IResult<&str, TomlValue> {
 }
 
 /// simple-key = quoted-key / unquoted-key
-fn parse_simple_key(input: &str) -> IResult<&str, String> {
+fn parse_simple_key(input: &str) -> IResult<&str, TomlKey> {
+    // map(alt((parse_quoted_key, parse_unquoted_key)), TomlKey::SimpleKey)(input)
+    map(_parse_simple_key, TomlKey::SimpleKey)(input)
+}
+
+/// simple-keyをパースするが、TomlKey::SimpleKeyでラップせずStringを返す
+fn _parse_simple_key(input: &str) -> IResult<&str, String> {
     alt((parse_quoted_key, parse_unquoted_key))(input)
 }
 
@@ -156,11 +186,11 @@ fn parse_quoted_key(input: &str) -> IResult<&str, String> {
 }
 
 /// dotted-key = simple-key 1*( dot-sep simple-key )
-fn parse_dotted_key(input: &str) -> IResult<&str, String> {
-    map(recognize(tuple((
-        parse_simple_key,
-        many1(tuple((parse_dot_sep, parse_simple_key))),
-    ))), &str::to_string)(input)
+fn parse_dotted_key(input: &str) -> IResult<&str, TomlKey> {
+    let (input, key) = _parse_simple_key(input)?;
+    let (input, keys) = many1(preceded(parse_dot_sep, _parse_simple_key))(input)?;
+    let output = TomlKey::DottedKey(iter::once(key).chain(keys).collect());
+    Ok((input, output))
 }
 
 // dot-sep   = ws %x2E ws  ; . Period
@@ -695,12 +725,7 @@ fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, Toml
 /// array-table-open  = %x5B.5B ws  ; [[ Double left square bracket
 /// array-table-close = ws %x5D.5D  ; ]] Double right square bracket
 fn parse_array_table(input: &str) -> IResult<&str, String> {
-    let (input, _) = tag("[[")(input)?;
-    let (input, _) = parse_ws(input)?;
-    let (input, key) = parse_key(input)?;
-    let (input, _) = parse_ws(input)?;
-    let (input, _) = tag("]]")(input)?;
-    Ok((input, key))
+    todo!()
 }
 
 // ALPHA = %x41-5A / %x61-7A ; A-Z / a-z
@@ -730,32 +755,41 @@ mod tests {
     #[test]
     fn test_key() {
         // unquoted-key
-        assert_eq!(parse_key("key"), Ok(("", "key".to_string())));
-        assert_eq!(parse_key("bare_key"), Ok(("", "bare_key".to_string())));
-        assert_eq!(parse_key("bare-key"), Ok(("", "bare-key".to_string())));
-        assert_eq!(parse_key("1234"), Ok(("", "1234".to_string())));
+        assert_eq!(parse_key("key"), Ok(("", TomlKey::SimpleKey("key".to_string()))));
+        assert_eq!(parse_key("bare_key"), Ok(("", TomlKey::SimpleKey("bare_key".to_string()))));
+        assert_eq!(parse_key("bare-key"), Ok(("", TomlKey::SimpleKey("bare-key".to_string()))));
+        assert_eq!(parse_key("1234"), Ok(("", TomlKey::SimpleKey("1234".to_string()))));
 
         // quoted-key
-        assert_eq!(parse_key("\"127.0.0.1\""), Ok(("", "127.0.0.1".to_string())));
+        assert_eq!(parse_key("\"127.0.0.1\""), Ok(("", TomlKey::SimpleKey("127.0.0.1".to_string()))));
         assert_eq!(
             parse_key("\"character encoding\""),
-            Ok(("", "character encoding".to_string()))
+            Ok(("", TomlKey::SimpleKey("character encoding".to_string())))
         );
-        assert_eq!(parse_key("\"ʎǝʞ\""), Ok(("", "ʎǝʞ".to_string())));
-        assert_eq!(parse_key("'key2'"), Ok(("", "key2".to_string())));
+        assert_eq!(parse_key("\"ʎǝʞ\""), Ok(("", TomlKey::SimpleKey("ʎǝʞ".to_string()))));
+        assert_eq!(parse_key("'key2'"), Ok(("", TomlKey::SimpleKey("key2".to_string()))));
         assert_eq!(
             parse_key("'quoted \"value\"'"),
-            Ok(("", "quoted \"value\"".to_string()))
+            Ok(("", TomlKey::SimpleKey("quoted \"value\"".to_string())))
         );
-        assert_eq!(parse_key("\"\""), Ok(("", "".to_string())));
-        assert_eq!(parse_key("''"), Ok(("", "".to_string())));
+        assert_eq!(parse_key("\"\""), Ok(("", TomlKey::SimpleKey("".to_string()))));
+        assert_eq!(parse_key("''"), Ok(("", TomlKey::SimpleKey("".to_string()))));
 
         // dotted-key
-        assert_eq!(parse_key("physical.color"), Ok(("", "physical.color".to_string())));
-        assert_eq!(parse_key("physical.shape"), Ok(("", "physical.shape".to_string())));
+        assert_eq!(parse_key("physical.color"), Ok(("", TomlKey::DottedKey(vec![
+            "physical".to_string(),
+            "color".to_string()
+        ]))));
+        assert_eq!(parse_key("physical.shape"), Ok(("", TomlKey::DottedKey(vec![
+            "physical".to_string(),
+            "shape".to_string()
+        ]))));
         assert_eq!(
             parse_key("site.\"google.com\""),
-            Ok(("", "site.\"google.com\"".to_string()))
+            Ok(("", TomlKey::DottedKey(vec![
+                "site".to_string(),
+                "google.com".to_string()
+            ])))
         );
     }
 
