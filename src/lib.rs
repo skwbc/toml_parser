@@ -4,19 +4,21 @@ use nom::{
     character::complete::{line_ending, one_of, space0},
     combinator::{map, not, opt, peek, recognize},
     multi::{many0, many1, many_m_n},
-    sequence::{delimited, preceded, tuple},
+    sequence::{delimited, preceded, terminated, tuple},
     IResult,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap};
 use std::iter;
 
-#[derive(Debug, PartialEq)]
+// type Toml = HashMap<String, TomlValue>;
+
+#[derive(Debug, PartialEq, Clone)]
 enum TomlKey {
     SimpleKey(String),
     DottedKey(Vec<String>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum TomlValue {
     String(String),
     Integer(i64),
@@ -27,19 +29,98 @@ pub enum TomlValue {
     Table(HashMap<String, TomlValue>),
 }
 
+#[derive(Debug, PartialEq, Clone)]
+enum TomlExpression {
+    KeyVal(HashMap<String, TomlValue>),
+    StdTable(TomlKey),
+    ArrayTable(TomlKey),
+}
+
 /// toml = expression *( newline expression )
 pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
-    let (input, kv) = parse_expression(input)?;
-    let (input, vec_kv) = many0(preceded(parse_newline, parse_expression))(input)?;
+    let (input, exp) = parse_expression(input)?;
+    let (input, vec_exp) = many0(preceded(parse_newline, parse_expression))(input)?;
 
-    let mut toml = match kv {
-        Some(kv) => kv,
-        None => HashMap::new(),
-    };
-    for kv in vec_kv.into_iter().flatten() {
-        toml = merge_maps(toml, kv);
+    let mut toml = HashMap::new();
+    let mut current_table: Option<&mut TomlValue> = None;
+    for exp in iter::once(exp).chain(vec_exp.into_iter()).flatten() {
+        println!("exp: {:?}", exp);
+        match exp {
+            TomlExpression::KeyVal(kv) => match current_table {
+                Some(TomlValue::Table(t)) => {
+                    *t = merge_maps(t.to_owned(), kv);
+                }
+                _ => {
+                    current_table = None; // Memo: ロジック的には不要だが、コンパイルエラーを回避するために必要
+                    toml = merge_maps(toml, kv);
+                }
+            },
+            TomlExpression::StdTable(key) => {
+                let empty_value = TomlValue::Table(HashMap::new());
+                let map = key_value_to_map(&key, &empty_value);
+                toml = merge_maps(toml, map);
+                match key {
+                    TomlKey::SimpleKey(k) => {
+                        current_table = toml.get_mut(&k);
+                    }
+                    TomlKey::DottedKey(keys) => {
+                        current_table = toml.get_mut(&keys[0]);
+                        for k in keys[1..].iter() {
+                            current_table = current_table.and_then(|v| match v {
+                                TomlValue::Table(t) => t.get_mut(k),
+                                _ => None,
+                            });
+                        }
+                    }
+                }
+            }
+            TomlExpression::ArrayTable(key) => {
+                match get_by_toml_key(&mut toml, &key) {
+                    Some(TomlValue::Array(a)) => {
+                        // keyが既に存在しても、ArrayTableの場合はエラーとしない
+                        a.push(TomlValue::Table(HashMap::new()));
+                    }
+                    _ => {
+                        let empty_value = TomlValue::Array(vec![TomlValue::Table(HashMap::new())]);
+                        let map = key_value_to_map(&key, &empty_value);
+                        toml = merge_maps(toml, map);
+                    }
+                }
+                current_table = get_by_toml_key(&mut toml, &key).and_then(|v| match v {
+                    TomlValue::Array(a) => a.last_mut(),
+                    _ => None,
+                });
+            }
+        }
     }
     Ok((input, toml))
+}
+
+fn get_by_toml_key<'a>(toml: &'a mut HashMap<String, TomlValue>, key: &TomlKey) -> Option<&'a mut TomlValue> {
+    match key {
+        TomlKey::SimpleKey(k) => toml.get_mut(k),
+        TomlKey::DottedKey(keys) => {
+            let mut current = toml.get_mut(&keys[0]);
+            for k in keys[1..].iter() {
+                current = current.and_then(|v| match v {
+                    TomlValue::Table(t) => t.get_mut(k),
+                    _ => None,
+                });
+            }
+            current
+        }
+    }
+}
+
+fn key_value_to_map(key: &TomlKey, value: &TomlValue) -> HashMap<String, TomlValue> {
+    match key {
+        TomlKey::SimpleKey(k) => {
+            let mut map = HashMap::new();
+            map.insert(k.to_owned(), value.to_owned());
+            map
+        }
+        TomlKey::DottedKey(keys) => dotted_key_to_map(keys, value),
+    }
 }
 
 pub fn merge_maps(
@@ -69,23 +150,15 @@ pub fn merge_maps(
 /// expression =  ws [ comment ]
 /// expression =/ ws keyval ws [ comment ]
 /// expression =/ ws table ws [ comment ]
-fn parse_expression(input: &str) -> IResult<&str, Option<HashMap<String, TomlValue>>> {
+fn parse_expression(input: &str) -> IResult<&str, Option<TomlExpression>> {
     let (input, _) = parse_ws(input)?;
-    let r_keyval = parse_keyval(input);
-    let r_table = parse_table(input);
-    let (input, kv) = match (r_keyval, r_table) {
-        (Ok((input, kv)), _) => {
-            let (input, _) = parse_ws(input)?;
-            (input, Some(kv))
-        }
-        (_, Ok((input, table))) => {
-            let (input, _) = parse_ws(input)?;
-            (input, Some(table))
-        }
-        _ => (input, None),
+    let r = terminated(alt((parse_keyval, parse_table)), parse_ws)(input);
+    let (input, expression) = match r {
+        Ok((input, kv)) => (input, Some(kv)),
+        Err(_) => (input, None),
     };
     let (input, _) = opt(parse_comment)(input)?;
-    Ok((input, kv))
+    Ok((input, expression))
 }
 
 /// ws = *wschar
@@ -115,7 +188,11 @@ fn parse_comment(input: &str) -> IResult<&str, &str> {
 }
 
 /// keyval = key keyval-sep val
-fn parse_keyval(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
+fn parse_keyval(input: &str) -> IResult<&str, TomlExpression> {
+    map(_parse_keyval, TomlExpression::KeyVal)(input)
+}
+
+fn _parse_keyval(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     match parse_key(input)? {
         (input, TomlKey::SimpleKey(key)) => {
             let (input, _) = parse_keyval_sep(input)?;
@@ -127,16 +204,21 @@ fn parse_keyval(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
         (input, TomlKey::DottedKey(keys)) => {
             let (input, _) = parse_keyval_sep(input)?;
             let (input, val) = parse_val(input)?;
-            let mut m = HashMap::new();
-            m.insert(keys.last().unwrap().clone(), val);
-            for key in keys.into_iter().rev().skip(1) {
-                let mut m2 = HashMap::new();
-                m2.insert(key, TomlValue::Table(m));
-                m = m2;
-            }
+            let m = dotted_key_to_map(&keys, &val);
             Ok((input, m))
         }
     }
+}
+
+fn dotted_key_to_map(keys: &Vec<String>, value: &TomlValue) -> HashMap<String, TomlValue> {
+    let mut map = HashMap::new();
+    map.insert(keys.last().unwrap().clone(), value.to_owned());
+    for key in keys.into_iter().rev().skip(1) {
+        let mut t = HashMap::new();
+        t.insert(key.to_owned(), TomlValue::Table(map));
+        map = t;
+    }
+    map
 }
 
 // keyval-sep = ws %x3D ws ; =
@@ -693,15 +775,19 @@ fn parse_ws_comment_newline(input: &str) -> IResult<&str, &str> {
 }
 
 /// table = std-table / array-table
-///
-/// ;; Standard Table
-///
+fn parse_table(input: &str) -> IResult<&str, TomlExpression> {
+    alt((parse_std_table, parse_array_table))(input)
+}
+
 /// std-table = std-table-open key std-table-close
 ///
 /// std-table-open  = %x5B ws     ; [ Left square bracket
 /// std-table-close = ws %x5D     ; ] Right square bracket
-fn parse_table(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
-    todo!()
+fn parse_std_table(input: &str) -> IResult<&str, TomlExpression> {
+    map(
+        delimited(tag("["), parse_key, tuple((parse_ws, tag("]")))),
+        TomlExpression::StdTable,
+    )(input)
 }
 
 /// inline-table = inline-table-open [ inline-table-keyvals ] ws-comment-newline inline-table-close
@@ -725,7 +811,7 @@ pub fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
 fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     let parse_inline_table_keyval = delimited(
         parse_ws_comment_newline,
-        parse_keyval,
+        _parse_keyval,
         tuple((parse_ws_comment_newline, opt(tag(",")))),
     );
     map(many1(parse_inline_table_keyval), |v| {
@@ -736,8 +822,11 @@ fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, Toml
 /// array-table = array-table-open key array-table-close
 /// array-table-open  = %x5B.5B ws  ; [[ Double left square bracket
 /// array-table-close = ws %x5D.5D  ; ]] Double right square bracket
-fn parse_array_table(input: &str) -> IResult<&str, String> {
-    todo!()
+fn parse_array_table(input: &str) -> IResult<&str, TomlExpression> {
+    map(
+        delimited(tag("[["), parse_key, tuple((parse_ws, tag("]]")))),
+        TomlExpression::ArrayTable,
+    )(input)
 }
 
 // ALPHA = %x41-5A / %x61-7A ; A-Z / a-z
@@ -1339,5 +1428,117 @@ mod tests {
                 )]))
             ))
         );
+    }
+
+    #[test]
+    fn test_parse_std_table() {
+        assert_eq!(
+            parse_table("[table]"),
+            Ok((
+                "",
+                TomlExpression::StdTable(TomlKey::SimpleKey("table".to_string()))
+            )),
+        );
+        assert_eq!(
+            parse_toml(
+                r#"
+            [table-1]
+            key1 = "some string"
+            key2 = 123
+
+            [table_2]
+            key1 = "another string"
+            key2 = 456
+            "#
+            ),
+            Ok((
+                "",
+                HashMap::from([
+                    (
+                        "table-1".to_string(),
+                        TomlValue::Table(HashMap::from([
+                            (
+                                "key1".to_string(),
+                                TomlValue::String("some string".to_string())
+                            ),
+                            ("key2".to_string(), TomlValue::Integer(123))
+                        ]))
+                    ),
+                    (
+                        "table_2".to_string(),
+                        TomlValue::Table(HashMap::from([
+                            (
+                                "key1".to_string(),
+                                TomlValue::String("another string".to_string())
+                            ),
+                            ("key2".to_string(), TomlValue::Integer(456))
+                        ]))
+                    )
+                ])
+            ))
+        );
+        assert_eq!(
+            parse_toml(
+                r#"
+            [dog."tater.man"]
+            type.name = "pug"
+            "#
+            ),
+            Ok((
+                "",
+                HashMap::from([(
+                    "dog".to_string(),
+                    TomlValue::Table(HashMap::from([(
+                        "tater.man".to_string(),
+                        TomlValue::Table(HashMap::from([(
+                            "type".to_string(),
+                            TomlValue::Table(HashMap::from([(
+                                "name".to_string(),
+                                TomlValue::String("pug".to_string())
+                            )]))
+                        )]))
+                    )]))
+                )])
+            ))
+        )
+    }
+
+    #[test]
+    fn test_parse_array_table() {
+        assert_eq!(
+            parse_toml(
+                r#"
+            [[products]]
+            name = "Hammer"
+            sku = 738594937
+
+            [[products]]
+
+            [[products]]
+            name = "Nail"
+            sku = 284758393
+
+            color = "gray"
+            "#
+            ),
+            Ok((
+                "",
+                HashMap::from([(
+                    "products".to_string(),
+                    TomlValue::Array(vec![
+                        TomlValue::Table(HashMap::from([
+                            ("name".to_string(), TomlValue::String("Hammer".to_string())),
+                            ("sku".to_string(), TomlValue::Integer(738594937))
+                        ])),
+                        TomlValue::Table(HashMap::new()),
+                        TomlValue::Table(HashMap::from([
+                            ("name".to_string(), TomlValue::String("Nail".to_string())),
+                            ("sku".to_string(), TomlValue::Integer(284758393)),
+                            ("color".to_string(), TomlValue::String("gray".to_string()))
+                        ]))
+                    ])
+                )])
+            ))
+        )
     }
 }
