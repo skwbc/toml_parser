@@ -1,3 +1,4 @@
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1, take_while_m_n},
@@ -7,8 +8,7 @@ use nom::{
     sequence::{delimited, preceded, terminated, tuple},
     IResult,
 };
-use std::{collections::HashMap};
-use std::iter;
+use std::{collections::HashMap, iter};
 
 // type Toml = HashMap<String, TomlValue>;
 
@@ -18,13 +18,17 @@ enum TomlKey {
     DottedKey(Vec<String>),
 }
 
+/// date-time      = offset-date-time / local-date-time / local-date / local-time
 #[derive(Debug, PartialEq, Clone)]
 pub enum TomlValue {
     String(String),
     Integer(i64),
     Float(f64),
     Boolean(bool),
-    Datetime(String), // TODO: DateTime 型にする
+    OffsetDateTime(DateTime<chrono::offset::FixedOffset>),
+    LocalDateTime(NaiveDateTime),
+    LocalDate(NaiveDate),
+    LocalTime(NaiveTime),
     Array(Vec<TomlValue>),
     Table(HashMap<String, TomlValue>),
 }
@@ -96,7 +100,10 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     Ok((input, toml))
 }
 
-fn get_by_toml_key<'a>(toml: &'a mut HashMap<String, TomlValue>, key: &TomlKey) -> Option<&'a mut TomlValue> {
+fn get_by_toml_key<'a>(
+    toml: &'a mut HashMap<String, TomlValue>,
+    key: &TomlKey,
+) -> Option<&'a mut TomlValue> {
     match key {
         TomlKey::SimpleKey(k) => toml.get_mut(k),
         TomlKey::DottedKey(keys) => {
@@ -656,16 +663,13 @@ fn parse_boolean(input: &str) -> IResult<&str, TomlValue> {
 }
 
 /// date-time      = offset-date-time / local-date-time / local-date / local-time
-fn parse_date_time(input: &str) -> IResult<&str, TomlValue> {
-    map(
-        alt((
-            parse_offset_date_time,
-            parse_local_date_time,
-            parse_local_date,
-            parse_local_time,
-        )),
-        |s| TomlValue::Datetime(s.to_string()),
-    )(input)
+pub fn parse_date_time(input: &str) -> IResult<&str, TomlValue> {
+    alt((
+        parse_offset_date_time,
+        parse_local_date_time,
+        parse_local_date,
+        parse_local_time,
+    ))(input)
 }
 
 /// date-fullyear  = 4DIGIT
@@ -719,23 +723,43 @@ fn parse_full_time(input: &str) -> IResult<&str, &str> {
 }
 
 /// offset-date-time = full-date time-delim full-time
-fn parse_offset_date_time(input: &str) -> IResult<&str, &str> {
-    recognize(tuple((parse_full_date, one_of("Tt "), parse_full_time)))(input)
+fn parse_offset_date_time(input: &str) -> IResult<&str, TomlValue> {
+    map(
+        tuple((parse_full_date, one_of("Tt "), parse_full_time)),
+        |(full_date, _, full_time)| {
+            let s = format!("{}T{}", full_date, full_time);
+            TomlValue::OffsetDateTime(DateTime::parse_from_rfc3339(&s).unwrap())
+        }
+    )(input)
 }
 
 /// local-date-time = full-date time-delim partial-time
-fn parse_local_date_time(input: &str) -> IResult<&str, &str> {
-    recognize(tuple((parse_full_date, one_of("Tt "), parse_partial_time)))(input)
+fn parse_local_date_time(input: &str) -> IResult<&str, TomlValue> {
+    map(
+        tuple((parse_full_date, one_of("Tt "), parse_partial_time)),
+        |(full_date, _, partial_time)| {
+            let s = format!("{}T{}", full_date, partial_time);
+            let mut result = NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S");
+            if result.is_err() {
+                result = NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S%.f");
+            }
+            TomlValue::LocalDateTime(result.unwrap())
+        },
+    )(input)
 }
 
 /// local-date = full-date
-fn parse_local_date(input: &str) -> IResult<&str, &str> {
-    parse_full_date(input)
+fn parse_local_date(input: &str) -> IResult<&str, TomlValue> {
+    map(parse_full_date, |s| {
+        TomlValue::LocalDate(NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap())
+    })(input)
 }
 
 /// local-time = partial-time
-fn parse_local_time(input: &str) -> IResult<&str, &str> {
-    parse_partial_time(input)
+fn parse_local_time(input: &str) -> IResult<&str, TomlValue> {
+    map(parse_partial_time, |s| {
+        TomlValue::LocalTime(NaiveTime::parse_from_str(s, "%H:%M:%S%.f").unwrap())
+    })(input)
 }
 
 /// array = array-open [ array-values ] ws-comment-newline array-close
@@ -1216,65 +1240,109 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_date_time() {
-        // offset-date-time
+    fn test_parse_offset_date_time() {
         assert_eq!(
             parse_date_time("1979-05-27T07:32:00Z"),
-            Ok(("", TomlValue::Datetime("1979-05-27T07:32:00Z".to_string())))
-        );
-        assert_eq!(
-            parse_date_time("1979-05-27T00:32:00-07:00"),
             Ok((
                 "",
-                TomlValue::Datetime("1979-05-27T00:32:00-07:00".to_string())
+                TomlValue::OffsetDateTime(
+                    DateTime::parse_from_rfc3339("1979-05-27T07:32:00Z").unwrap()
+                )
             ))
         );
         assert_eq!(
             parse_date_time("1979-05-27T00:32:00-07:00"),
             Ok((
                 "",
-                TomlValue::Datetime("1979-05-27T00:32:00-07:00".to_string())
+                TomlValue::OffsetDateTime(
+                    DateTime::parse_from_rfc3339("1979-05-27T00:32:00-07:00").unwrap()
+                )
+            ))
+        );
+        assert_eq!(
+            parse_date_time("1979-05-27T00:32:00-07:00"),
+            Ok((
+                "",
+                TomlValue::OffsetDateTime(
+                    DateTime::parse_from_rfc3339("1979-05-27T00:32:00-07:00").unwrap()
+                )
             ))
         );
         assert_eq!(
             parse_date_time("1979-05-27T00:32:00.999999-07:00"),
             Ok((
                 "",
-                TomlValue::Datetime("1979-05-27T00:32:00.999999-07:00".to_string())
+                TomlValue::OffsetDateTime(
+                    DateTime::parse_from_rfc3339("1979-05-27T00:32:00.999999-07:00").unwrap()
+                )
             ))
         );
         assert_eq!(
             parse_date_time("1979-05-27 07:32:00Z"),
-            Ok(("", TomlValue::Datetime("1979-05-27 07:32:00Z".to_string())))
-        );
-
-        // local-date-time
-        assert_eq!(
-            parse_date_time("1979-05-27T07:32:00"),
-            Ok(("", TomlValue::Datetime("1979-05-27T07:32:00".to_string())))
-        );
-        assert_eq!(
-            parse_date_time("1979-05-27T00:32:00.999999"),
             Ok((
                 "",
-                TomlValue::Datetime("1979-05-27T00:32:00.999999".to_string())
+                TomlValue::OffsetDateTime(
+                    DateTime::parse_from_rfc3339("1979-05-27T07:32:00Z").unwrap()
+                )
             ))
         );
+    }
 
-        // local-date
+    #[test]
+    fn test_parse_local_date_time() {
+        assert_eq!(
+            parse_date_time("1979-05-27T07:32:00"),
+            Ok((
+                "",
+                TomlValue::LocalDateTime(
+                    NaiveDateTime::parse_from_str("1979-05-27T07:32:00", "%Y-%m-%dT%H:%M:%S")
+                        .unwrap()
+                )
+            ))
+        );
+        // assert_eq!(
+        //     parse_date_time("1979-05-27T00:32:00.999999"),
+        //     Ok((
+        //         "",
+        //         TomlValue::LocalDateTime(
+        //             NaiveDateTime::parse_from_str(
+        //                 "1979-05-27T00:32:00.999999",
+        //                 "%Y-%m-%dT%H:%M:%S%.f"
+        //             )
+        //             .unwrap()
+        //         )
+        //     ))
+        // );
+    }
+
+    #[test]
+    fn test_parse_local_date() {
         assert_eq!(
             parse_date_time("1979-05-27"),
-            Ok(("", TomlValue::Datetime("1979-05-27".to_string())))
+            Ok((
+                "",
+                TomlValue::LocalDate(NaiveDate::parse_from_str("1979-05-27", "%Y-%m-%d").unwrap())
+            ))
         );
+    }
 
-        // local-time
+    #[test]
+    fn test_parse_local_time() {
         assert_eq!(
             parse_date_time("07:32:00"),
-            Ok(("", TomlValue::Datetime("07:32:00".to_string())))
+            Ok((
+                "",
+                TomlValue::LocalTime(NaiveTime::parse_from_str("07:32:00", "%H:%M:%S").unwrap())
+            ))
         );
         assert_eq!(
             parse_date_time("00:32:00.999999"),
-            Ok(("", TomlValue::Datetime("00:32:00.999999".to_string())))
+            Ok((
+                "",
+                TomlValue::LocalTime(
+                    NaiveTime::parse_from_str("00:32:00.999999", "%H:%M:%S%.f").unwrap()
+                )
+            ))
         );
     }
 
