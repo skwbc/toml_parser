@@ -1609,4 +1609,92 @@ mod tests {
             ))
         )
     }
+
+    #[test]
+    fn test_invalid_cases() {
+        assert!(parse_toml("key = ").is_err());
+        assert!(parse_toml("first = \"Tom\" last = \"Preston-Werner\"").is_err());
+        assert!(parse_toml("= \"no key name\"").is_err());
+        assert!(parse_toml(r#"
+            name = "Tom"
+            name = "Pradyun"
+            "#).is_err());
+        assert!(parse_toml(r#"
+            spelling = "favorite"
+            "spelling" = "favourite"
+            "#).is_err());
+        assert!(parse_toml(r#"
+            fruit.apple = 1
+            fruit.apple.smooth = true
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [a]
+            b = 1
+
+            [a]
+            c = 2
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [a]
+            b = 1
+
+            [a.b]
+            c = 2
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [fruit]
+            apple.color = "red"
+            apple.taste.sweet = true
+
+            [fruit.apple]
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [fruit]
+            apple.color = "red"
+            apple.taste.sweet = true
+
+            [fruit.apple.taste]
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [product]
+            type = { name = "Nail" }
+            type.edible = false
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [product]
+            type.name = "Nail"
+            type = { edible = false }
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [fruit.physical]
+            color = "red"
+            shape = "round"
+
+            [[fruit]]
+            name = "apple"
+            "#).is_err());
+        assert!(parse_toml(r#"
+            fruit = []
+
+            [[fruit]]
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [[fruit]]
+            name = "apple"
+
+            [[fruit.variety]]
+            name = "red delicious"
+
+            [fruit.variety]
+            name = "granny smith"
+            "#).is_err());
+        assert!(parse_toml(r#"
+            [fruit.physical]
+            color = "red"
+            shape = "round"
+
+            [[fruit.physical]]
+            color = "green"
+            "#).is_err());
+    }
 }
