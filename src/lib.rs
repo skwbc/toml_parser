@@ -30,7 +30,9 @@ pub enum TomlValue {
     LocalDate(NaiveDate),
     LocalTime(NaiveTime),
     Array(Vec<TomlValue>),
+    InlineTable(HashMap<String, TomlValue>),
     Table(HashMap<String, TomlValue>),
+    ArrayTable(Vec<HashMap<String, TomlValue>>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -43,14 +45,16 @@ enum TomlExpression {
 /// toml = expression *( newline expression )
 pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     let (input, exp) = parse_expression(input)?;
+    // ToDo: many0を使うのではなく、forループ内で毎回precededを呼び出すようにすれば、どの時点でエラーが発生したかを明確にできる
     let (input, vec_exp) = many0(preceded(parse_newline, parse_expression))(input)?;
 
     let mut toml = HashMap::new();
-    let mut current_table: Option<&mut TomlValue> = None;
+    // let mut current_table: Option<&mut TomlValue> = None;
+    let mut current_table: Option<&mut HashMap<String, TomlValue>> = None;
     for exp in iter::once(exp).chain(vec_exp.into_iter()).flatten() {
         match exp {
-            TomlExpression::KeyVal(kv) => match current_table {
-                Some(TomlValue::Table(t)) => {
+            TomlExpression::KeyVal(kv) => match current_table.as_deref_mut() {
+                Some(t) => {
                     *t = merge_maps(t.to_owned(), kv);
                 }
                 _ => {
@@ -67,13 +71,19 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
                 toml = merge_maps(toml, map);
                 match key {
                     TomlKey::SimpleKey(k) => {
-                        current_table = toml.get_mut(&k);
+                        current_table = match toml.get_mut(&k) {
+                            Some(TomlValue::Table(t)) => Some(t),
+                            _ => None,
+                        };
                     }
                     TomlKey::DottedKey(keys) => {
-                        current_table = toml.get_mut(&keys[0]);
+                        current_table = match toml.get_mut(&keys[0]) {
+                            Some(TomlValue::Table(t)) => Some(t),
+                            _ => None,
+                        };
                         for k in keys[1..].iter() {
-                            current_table = current_table.and_then(|v| match v {
-                                TomlValue::Table(t) => t.get_mut(k),
+                            current_table = current_table.and_then(|map| match map.get_mut(k) {
+                                Some(TomlValue::Table(t)) => Some(t),
                                 _ => None,
                             });
                         }
@@ -82,18 +92,18 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
             }
             TomlExpression::ArrayTable(key) => {
                 match get_by_toml_key(&mut toml, &key) {
-                    Some(TomlValue::Array(a)) => {
+                    Some(TomlValue::ArrayTable(a)) => {
                         // keyが既に存在しても、ArrayTableの場合はエラーとしない
-                        a.push(TomlValue::Table(HashMap::new()));
+                        a.push(HashMap::new());
                     }
                     _ => {
-                        let empty_value = TomlValue::Array(vec![TomlValue::Table(HashMap::new())]);
+                        let empty_value = TomlValue::ArrayTable(vec![HashMap::new()]);
                         let map = key_value_to_map(&key, &empty_value);
                         toml = merge_maps(toml, map);
                     }
                 }
                 current_table = get_by_toml_key(&mut toml, &key).and_then(|v| match v {
-                    TomlValue::Array(a) => a.last_mut(),
+                    TomlValue::ArrayTable(a) => a.last_mut(),
                     _ => None,
                 });
             }
@@ -101,6 +111,7 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     }
 
     // inputが空文字列でない場合はエラーとする
+    // ToDo: 一部のケースでは、cut を使って nom::error::Failure を使えば普通のパーサーエラーに出来そう
     if input.is_empty() {
         Ok((input, toml))
     } else {
@@ -844,7 +855,7 @@ pub fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
             opt(parse_inline_table_keyvals),
             tuple((parse_ws_comment_newline, tag("}"))),
         ),
-        |t| TomlValue::Table(t.unwrap_or_default()),
+        |t| TomlValue::InlineTable(t.unwrap_or_default()),
     )(input)
 }
 
@@ -1448,7 +1459,7 @@ mod tests {
                 "",
                 TomlValue::Array(vec![
                     TomlValue::String("Foo Bar <foo@example.com>".to_string()),
-                    TomlValue::Table(HashMap::from([
+                    TomlValue::InlineTable(HashMap::from([
                         ("name".to_string(), TomlValue::String("Baz Qux".to_string())),
                         ("email".to_string(), TomlValue::String("bazqux@example.com".to_string())),
                         ("url".to_string(), TomlValue::String("https://example.com/bazqux".to_string())),
@@ -1482,7 +1493,7 @@ mod tests {
             parse_inline_table("{ first = \"Tom\", last = \"Preston-Werner\" }"),
             Ok((
                 "",
-                TomlValue::Table(HashMap::from([
+                TomlValue::InlineTable(HashMap::from([
                     ("first".to_string(), TomlValue::String("Tom".to_string())),
                     (
                         "last".to_string(),
@@ -1495,7 +1506,7 @@ mod tests {
             parse_inline_table("{ x = 1, y = 2 }"),
             Ok((
                 "",
-                TomlValue::Table(HashMap::from([
+                TomlValue::InlineTable(HashMap::from([
                     ("x".to_string(), TomlValue::Integer(1)),
                     ("y".to_string(), TomlValue::Integer(2))
                 ]))
@@ -1505,7 +1516,7 @@ mod tests {
             parse_inline_table("{ type.name = \"pug\" }"),
             Ok((
                 "",
-                TomlValue::Table(HashMap::from([(
+                TomlValue::InlineTable(HashMap::from([(
                     "type".to_string(),
                     TomlValue::Table(HashMap::from([(
                         "name".to_string(),
@@ -1611,17 +1622,86 @@ mod tests {
                 "",
                 HashMap::from([(
                     "products".to_string(),
-                    TomlValue::Array(vec![
-                        TomlValue::Table(HashMap::from([
+                    TomlValue::ArrayTable(vec![
+                        HashMap::from([
                             ("name".to_string(), TomlValue::String("Hammer".to_string())),
                             ("sku".to_string(), TomlValue::Integer(738594937))
-                        ])),
-                        TomlValue::Table(HashMap::new()),
-                        TomlValue::Table(HashMap::from([
+                        ]),
+                        HashMap::new(),
+                        HashMap::from([
                             ("name".to_string(), TomlValue::String("Nail".to_string())),
                             ("sku".to_string(), TomlValue::Integer(284758393)),
                             ("color".to_string(), TomlValue::String("gray".to_string()))
-                        ]))
+                        ])
+                    ])
+                )])
+            ))
+        )
+    }
+
+    #[test]
+    fn test_parse_nested_array_table() {
+        assert_eq!(
+            parse_toml(
+                r#"
+                [[fruit]]
+                name = "apple"
+            
+                [fruit.physical] # テーブル
+                color = "red"
+                shape = "round"
+            
+                [[fruit.variety]] # ネストされたテーブルの配列
+                name = "red delicious"
+            
+                [[fruit.variety]]
+                name = "granny smith"
+            
+            [[fruit]]
+                name = "banana"
+            
+                [[fruit.variety]]
+                name = "plantain"
+            "#
+            ),
+            Ok((
+                "",
+                HashMap::from([(
+                    "fruit".to_string(),
+                    TomlValue::ArrayTable(vec![
+                        HashMap::from([
+                            ("name".to_string(), TomlValue::String("apple".to_string())),
+                            (
+                                "physical".to_string(),
+                                TomlValue::Table(HashMap::from([
+                                    ("color".to_string(), TomlValue::String("red".to_string())),
+                                    ("shape".to_string(), TomlValue::String("round".to_string()))
+                                ]))
+                            ),
+                            (
+                                "variety".to_string(),
+                                TomlValue::ArrayTable(vec![
+                                    HashMap::from([(
+                                        "name".to_string(),
+                                        TomlValue::String("red delicious".to_string())
+                                    )]),
+                                    HashMap::from([(
+                                        "name".to_string(),
+                                        TomlValue::String("granny smith".to_string())
+                                    )])
+                                ])
+                            )
+                        ]),
+                        HashMap::from([
+                            ("name".to_string(), TomlValue::String("banana".to_string())),
+                            (
+                                "variety".to_string(),
+                                TomlValue::ArrayTable(vec![HashMap::from([(
+                                    "name".to_string(),
+                                    TomlValue::String("plantain".to_string())
+                                )])])
+                            )
+                        ])
                     ])
                 )])
             ))
@@ -1642,8 +1722,9 @@ mod tests {
             r#"
             name = "Tom"
             name = "Pradyun"
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1653,8 +1734,9 @@ mod tests {
             r#"
             spelling = "favorite"
             "spelling" = "favourite"
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1664,8 +1746,9 @@ mod tests {
             r#"
             fruit.apple = 1
             fruit.apple.smooth = true
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1678,8 +1761,9 @@ mod tests {
 
             [a]
             c = 2
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1692,8 +1776,9 @@ mod tests {
 
             [a.b]
             c = 2
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1706,8 +1791,9 @@ mod tests {
             apple.taste.sweet = true
 
             [fruit.apple]
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1720,70 +1806,97 @@ mod tests {
             apple.taste.sweet = true
 
             [fruit.apple.taste]
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "key type is already defined")]
     fn test_inline_table_and_sub_table() {
         parse_toml(
             r#"
             [product]
             type = { name = "Nail" }
             type.edible = false
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "key type is already defined")]
+    fn test_sub_table_inline_table() {
+        parse_toml(
+            r#"
+            [product]
+            type.name = "Nail"
+            type = { edible = false }
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "key fruit is already defined")]
+    fn test_sub_table_array_table() {
+        parse_toml(
+            r#"
+            [fruit.physical]
+            color = "red"
+            shape = "round"
+
+            [[fruit]]
+            name = "apple"
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "key fruit is already defined")]
+    fn test_array_array_table() {
+        parse_toml(
+            r#"
+            fruit = []
+
+            [[fruit]]
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "key fruit.variety is already defined")]
+    fn test_array_table_table() {
+        parse_toml(
+            r#"
+            [[fruit]]
+            name = "apple"
+
+            [[fruit.variety]]
+            name = "red delicious"
+
+            [fruit.variety]
+            name = "granny smith"
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "key fruit.physical is already defined")]
+    fn test_table_array_table() {
+        assert!(parse_toml(
+            r#"
+            [fruit.physical]
+            color = "red"
+            shape = "round"
+
+            [[fruit.physical]]
+            color = "green"
             "#
-        ).unwrap();
-        // assert!(parse_toml(
-        //     r#"
-        //     [product]
-        //     type.name = "Nail"
-        //     type = { edible = false }
-        //     "#
-        // )
-        // .is_err());
-        // assert!(parse_toml(
-        //     r#"
-        //     [fruit.physical]
-        //     color = "red"
-        //     shape = "round"
-
-        //     [[fruit]]
-        //     name = "apple"
-        //     "#
-        // )
-        // .is_err());
-        // assert!(parse_toml(
-        //     r#"
-        //     fruit = []
-
-        //     [[fruit]]
-        //     "#
-        // )
-        // .is_err());
-        // assert!(parse_toml(
-        //     r#"
-        //     [[fruit]]
-        //     name = "apple"
-
-        //     [[fruit.variety]]
-        //     name = "red delicious"
-
-        //     [fruit.variety]
-        //     name = "granny smith"
-        //     "#
-        // )
-        // .is_err());
-        // assert!(parse_toml(
-        //     r#"
-        //     [fruit.physical]
-        //     color = "red"
-        //     shape = "round"
-
-        //     [[fruit.physical]]
-        //     color = "green"
-        //     "#
-        // )
-        // .is_err());
+        )
+        .is_err());
     }
 }
