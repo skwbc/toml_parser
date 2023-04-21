@@ -944,6 +944,7 @@ fn parse_array_table(input: &str) -> IResult<&str, TomlExpression> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maplit::hashmap;
 
     #[test]
     fn test_comment() {
@@ -1475,11 +1476,13 @@ mod tests {
                 "",
                 TomlValue::Array(vec![
                     TomlValue::String("Foo Bar <foo@example.com>".to_string()),
-                    TomlValue::InlineTable(HashMap::from([
-                        ("name".to_string(), TomlValue::String("Baz Qux".to_string())),
-                        ("email".to_string(), TomlValue::String("bazqux@example.com".to_string())),
-                        ("url".to_string(), TomlValue::String("https://example.com/bazqux".to_string())),
-                    ]))
+                    TomlValue::InlineTable(
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("Baz Qux".to_string()),
+                            "email".to_string() => TomlValue::String("bazqux@example.com".to_string()),
+                            "url".to_string() => TomlValue::String("https://example.com/bazqux".to_string()),
+                        }
+                    )
                 ])
             ))
         );
@@ -1509,36 +1512,31 @@ mod tests {
             parse_inline_table("{ first = \"Tom\", last = \"Preston-Werner\" }"),
             Ok((
                 "",
-                TomlValue::InlineTable(HashMap::from([
-                    ("first".to_string(), TomlValue::String("Tom".to_string())),
-                    (
-                        "last".to_string(),
-                        TomlValue::String("Preston-Werner".to_string())
-                    )
-                ]))
+                TomlValue::InlineTable(hashmap! {
+                    "first".to_string() => TomlValue::String("Tom".to_string()),
+                    "last".to_string() => TomlValue::String("Preston-Werner".to_string())
+                })
             ))
         );
         assert_eq!(
             parse_inline_table("{ x = 1, y = 2 }"),
             Ok((
                 "",
-                TomlValue::InlineTable(HashMap::from([
-                    ("x".to_string(), TomlValue::Integer(1)),
-                    ("y".to_string(), TomlValue::Integer(2))
-                ]))
+                TomlValue::InlineTable(hashmap! {
+                    "x".to_string() => TomlValue::Integer(1),
+                    "y".to_string() => TomlValue::Integer(2),
+                })
             ))
         );
         assert_eq!(
             parse_inline_table("{ type.name = \"pug\" }"),
             Ok((
                 "",
-                TomlValue::InlineTable(HashMap::from([(
-                    "type".to_string(),
-                    TomlValue::Table(HashMap::from([(
-                        "name".to_string(),
-                        TomlValue::String("pug".to_string())
-                    )]))
-                )]))
+                TomlValue::InlineTable(hashmap! {
+                    "type".to_string() => TomlValue::Table(hashmap!{
+                        "name".to_string() => TomlValue::String("pug".to_string())
+                    })
+                })
             ))
         );
     }
@@ -1566,28 +1564,16 @@ mod tests {
             ),
             Ok((
                 "",
-                HashMap::from([
-                    (
-                        "table-1".to_string(),
-                        TomlValue::Table(HashMap::from([
-                            (
-                                "key1".to_string(),
-                                TomlValue::String("some string".to_string())
-                            ),
-                            ("key2".to_string(), TomlValue::Integer(123))
-                        ]))
-                    ),
-                    (
-                        "table_2".to_string(),
-                        TomlValue::Table(HashMap::from([
-                            (
-                                "key1".to_string(),
-                                TomlValue::String("another string".to_string())
-                            ),
-                            ("key2".to_string(), TomlValue::Integer(456))
-                        ]))
-                    )
-                ])
+                hashmap! {
+                    "table-1".to_string() => TomlValue::Table(hashmap!{
+                        "key1".to_string() => TomlValue::String("some string".to_string()),
+                        "key2".to_string() => TomlValue::Integer(123)
+                    }),
+                    "table_2".to_string() => TomlValue::Table(hashmap!{
+                        "key1".to_string() => TomlValue::String("another string".to_string()),
+                        "key2".to_string() => TomlValue::Integer(456)
+                    })
+                }
             ))
         );
         assert_eq!(
@@ -1599,19 +1585,15 @@ mod tests {
             ),
             Ok((
                 "",
-                HashMap::from([(
-                    "dog".to_string(),
-                    TomlValue::Table(HashMap::from([(
-                        "tater.man".to_string(),
-                        TomlValue::Table(HashMap::from([(
-                            "type".to_string(),
-                            TomlValue::Table(HashMap::from([(
-                                "name".to_string(),
-                                TomlValue::String("pug".to_string())
-                            )]))
-                        )]))
-                    )]))
-                )])
+                hashmap! {
+                    "dog".to_string() => TomlValue::Table(hashmap!{
+                        "tater.man".to_string() => TomlValue::Table(hashmap!{
+                            "type".to_string() => TomlValue::Table(hashmap!{
+                                "name".to_string() => TomlValue::String("pug".to_string())
+                            })
+                        })
+                    })
+                }
             ))
         )
     }
@@ -1636,21 +1618,20 @@ mod tests {
             ),
             Ok((
                 "",
-                HashMap::from([(
-                    "products".to_string(),
-                    TomlValue::ArrayTable(vec![
-                        HashMap::from([
-                            ("name".to_string(), TomlValue::String("Hammer".to_string())),
-                            ("sku".to_string(), TomlValue::Integer(738594937))
-                        ]),
-                        HashMap::new(),
-                        HashMap::from([
-                            ("name".to_string(), TomlValue::String("Nail".to_string())),
-                            ("sku".to_string(), TomlValue::Integer(284758393)),
-                            ("color".to_string(), TomlValue::String("gray".to_string()))
-                        ])
+                hashmap! {
+                    "products".to_string() => TomlValue::ArrayTable(vec![
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("Hammer".to_string()),
+                            "sku".to_string() => TomlValue::Integer(738594937)
+                        },
+                        hashmap!{},
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("Nail".to_string()),
+                            "sku".to_string() => TomlValue::Integer(284758393),
+                            "color".to_string() => TomlValue::String("gray".to_string())
+                        }
                     ])
-                )])
+                }
             ))
         )
     }
@@ -1682,44 +1663,33 @@ mod tests {
             ),
             Ok((
                 "",
-                HashMap::from([(
-                    "fruit".to_string(),
-                    TomlValue::ArrayTable(vec![
-                        HashMap::from([
-                            ("name".to_string(), TomlValue::String("apple".to_string())),
-                            (
-                                "physical".to_string(),
-                                TomlValue::Table(HashMap::from([
-                                    ("color".to_string(), TomlValue::String("red".to_string())),
-                                    ("shape".to_string(), TomlValue::String("round".to_string()))
-                                ]))
-                            ),
-                            (
-                                "variety".to_string(),
-                                TomlValue::ArrayTable(vec![
-                                    HashMap::from([(
-                                        "name".to_string(),
-                                        TomlValue::String("red delicious".to_string())
-                                    )]),
-                                    HashMap::from([(
-                                        "name".to_string(),
-                                        TomlValue::String("granny smith".to_string())
-                                    )])
-                                ])
-                            )
-                        ]),
-                        HashMap::from([
-                            ("name".to_string(), TomlValue::String("banana".to_string())),
-                            (
-                                "variety".to_string(),
-                                TomlValue::ArrayTable(vec![HashMap::from([(
-                                    "name".to_string(),
-                                    TomlValue::String("plantain".to_string())
-                                )])])
-                            )
-                        ])
+                hashmap! {
+                    "fruit".to_string() => TomlValue::ArrayTable(vec![
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("apple".to_string()),
+                            "physical".to_string() => TomlValue::Table(hashmap!{
+                                "color".to_string() => TomlValue::String("red".to_string()),
+                                "shape".to_string() => TomlValue::String("round".to_string())
+                            }),
+                            "variety".to_string() => TomlValue::ArrayTable(vec![
+                                hashmap!{
+                                    "name".to_string() => TomlValue::String("red delicious".to_string())
+                                },
+                                hashmap!{
+                                    "name".to_string() => TomlValue::String("granny smith".to_string())
+                                }
+                            ])
+                        },
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("banana".to_string()),
+                            "variety".to_string() => TomlValue::ArrayTable(vec![
+                                hashmap!{
+                                    "name".to_string() => TomlValue::String("plantain".to_string())
+                                }
+                            ])
+                        }
                     ])
-                )])
+                }
             ))
         )
     }
@@ -1911,7 +1881,7 @@ mod tests {
 
             [[fruit.physical]]
             color = "green"
-            "#
+            "#,
         )
         .unwrap();
     }
