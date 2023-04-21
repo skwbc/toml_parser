@@ -51,72 +51,7 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     let mut toml = HashMap::new();
     let mut current_key = None;
     for exp in iter::once(exp).chain(vec_exp.into_iter()).flatten() {
-        match exp {
-            TomlExpression::KeyVal((key, value)) => {
-                // エラー: 同じキーがcurrent_table内に既に存在する
-                // エラー: dotted-keyの途中の階層のキーがcurrent_table内に既に存在するがそれがTableではない
-                let current_table = match current_key {
-                    Some(ref key) => match get_by_key(&mut toml, key, true) {
-                        GetResult::Found(TomlValue::Table(v)) => v,
-                        GetResult::Found(TomlValue::ArrayTable(v)) => v.last_mut().unwrap(),
-                        _ => unreachable!(),
-                    },
-                    None => &mut toml,
-                };
-                match check_key(current_table, &key, false) {
-                    CheckResult::Found | CheckResult::ArrayTableFound => {
-                        panic!("key {} is already defined", key_to_name(&key))
-                    }
-                    CheckResult::NotFound => {
-                        insert_key_value_to_map(current_table, &key, value, false);
-                    }
-                    CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
-                }
-            }
-            TomlExpression::StdTable(key) => {
-                // エラー: 同じキーがtoml内に既に存在する
-                // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
-                match check_key(&toml, &key, true) {
-                    CheckResult::Found | CheckResult::ArrayTableFound => {
-                        panic!("key {} is already defined", key_to_name(&key))
-                    }
-                    CheckResult::NotFound => {
-                        insert_key_value_to_map(
-                            &mut toml,
-                            &key,
-                            TomlValue::Table(HashMap::new()),
-                            true,
-                        );
-                    }
-                    CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
-                }
-                current_key = Some(key.clone());
-            }
-            TomlExpression::ArrayTable(key) => {
-                // エラー: 同じキーがtoml内に既に存在し、それがArrayTableではない
-                // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
-                match check_key(&toml, &key, true) {
-                    CheckResult::Found => panic!("key {} is already defined", key_to_name(&key)),
-                    CheckResult::ArrayTableFound => {
-                        let current_table = match get_by_key(&mut toml, &key, true) {
-                            GetResult::Found(TomlValue::ArrayTable(v)) => v,
-                            _ => unreachable!(),
-                        };
-                        current_table.push(HashMap::new());
-                    }
-                    CheckResult::NotFound => {
-                        insert_key_value_to_map(
-                            &mut toml,
-                            &key,
-                            TomlValue::ArrayTable(vec![HashMap::new()]),
-                            true,
-                        );
-                    }
-                    CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
-                }
-                current_key = Some(key.clone());
-            }
-        }
+        current_key = add_expression_to_toml(&mut toml, current_key, exp);
     }
 
     // inputが空文字列でない場合はエラーとする
@@ -128,6 +63,75 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
             input,
             nom::error::ErrorKind::Eof, // ToDo: 適切なエラーコードを考える
         )))
+    }
+}
+
+fn add_expression_to_toml(
+    toml: &mut HashMap<String, TomlValue>,
+    current_key: Option<TomlKey>,
+    exp: TomlExpression,
+) -> Option<TomlKey> {
+    match exp {
+        TomlExpression::KeyVal((key, value)) => {
+            // エラー: 同じキーがcurrent_table内に既に存在する
+            // エラー: dotted-keyの途中の階層のキーがcurrent_table内に既に存在するがそれがTableではない
+            let current_table = match current_key {
+                Some(ref key) => match get_by_key(toml, key, true) {
+                    GetResult::Found(TomlValue::Table(v)) => v,
+                    GetResult::Found(TomlValue::ArrayTable(v)) => v.last_mut().unwrap(),
+                    _ => unreachable!(),
+                },
+                None => toml,
+            };
+            match check_key(current_table, &key, false) {
+                CheckResult::Found | CheckResult::ArrayTableFound => {
+                    panic!("key {} is already defined", key_to_name(&key))
+                }
+                CheckResult::NotFound => {
+                    insert_key_value_to_map(current_table, &key, value, false);
+                }
+                CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
+            }
+            current_key
+        }
+        TomlExpression::StdTable(key) => {
+            // エラー: 同じキーがtoml内に既に存在する
+            // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
+            match check_key(toml, &key, true) {
+                CheckResult::Found | CheckResult::ArrayTableFound => {
+                    panic!("key {} is already defined", key_to_name(&key))
+                }
+                CheckResult::NotFound => {
+                    insert_key_value_to_map(toml, &key, TomlValue::Table(HashMap::new()), true);
+                }
+                CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
+            }
+            Some(key)
+        }
+        TomlExpression::ArrayTable(key) => {
+            // エラー: 同じキーがtoml内に既に存在し、それがArrayTableではない
+            // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
+            match check_key(toml, &key, true) {
+                CheckResult::Found => panic!("key {} is already defined", key_to_name(&key)),
+                CheckResult::ArrayTableFound => {
+                    let current_table = match get_by_key(toml, &key, true) {
+                        GetResult::Found(TomlValue::ArrayTable(v)) => v,
+                        _ => unreachable!(),
+                    };
+                    current_table.push(HashMap::new());
+                }
+                CheckResult::NotFound => {
+                    insert_key_value_to_map(
+                        toml,
+                        &key,
+                        TomlValue::ArrayTable(vec![HashMap::new()]),
+                        true,
+                    );
+                }
+                CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
+            }
+            Some(key)
+        }
     }
 }
 
