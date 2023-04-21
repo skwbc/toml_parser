@@ -5,7 +5,7 @@ use nom::{
     character::complete::{line_ending, one_of, space0},
     combinator::{map, not, opt, peek, recognize},
     multi::{many0, many1, many_m_n},
-    sequence::{delimited, preceded, terminated, tuple},
+    sequence::{delimited, preceded, separated_pair, terminated, tuple},
     IResult,
 };
 use std::{collections::HashMap, iter};
@@ -37,7 +37,7 @@ pub enum TomlValue {
 
 #[derive(Debug, PartialEq, Clone)]
 enum TomlExpression {
-    KeyVal(HashMap<String, TomlValue>),
+    KeyVal((TomlKey, TomlValue)),
     StdTable(TomlKey),
     ArrayTable(TomlKey),
 }
@@ -49,63 +49,72 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     let (input, vec_exp) = many0(preceded(parse_newline, parse_expression))(input)?;
 
     let mut toml = HashMap::new();
-    // let mut current_table: Option<&mut TomlValue> = None;
-    let mut current_table: Option<&mut HashMap<String, TomlValue>> = None;
+    let mut current_key = None;
     for exp in iter::once(exp).chain(vec_exp.into_iter()).flatten() {
         match exp {
-            TomlExpression::KeyVal(kv) => match current_table.as_deref_mut() {
-                Some(t) => {
-                    *t = merge_maps(t.to_owned(), kv);
-                }
-                _ => {
-                    current_table = None; // Memo: ロジック的には不要だが、コンパイルエラーを回避するために必要
-                    toml = merge_maps(toml, kv);
-                }
-            },
-            TomlExpression::StdTable(key) => {
-                if get_by_toml_key(&mut toml, &key).is_some() {
-                    panic!("table {} is already defined", key_to_name(&key));
-                }
-                let empty_value = TomlValue::Table(HashMap::new());
-                let map = key_value_to_map(&key, &empty_value);
-                toml = merge_maps(toml, map);
-                match key {
-                    TomlKey::SimpleKey(k) => {
-                        current_table = match toml.get_mut(&k) {
-                            Some(TomlValue::Table(t)) => Some(t),
-                            _ => None,
-                        };
+            TomlExpression::KeyVal((key, value)) => {
+                // エラー: 同じキーがcurrent_table内に既に存在する
+                // エラー: dotted-keyの途中の階層のキーがcurrent_table内に既に存在するがそれがTableではない
+                let current_table = match current_key {
+                    Some(ref key) => match get_by_key(&mut toml, key, true) {
+                        GetResult::Found(TomlValue::Table(v)) => v,
+                        GetResult::Found(TomlValue::ArrayTable(v)) => v.last_mut().unwrap(),
+                        _ => unreachable!(),
+                    },
+                    None => &mut toml,
+                };
+                match check_key(current_table, &key, false) {
+                    CheckResult::Found | CheckResult::ArrayTableFound => {
+                        panic!("key {} is already defined", key_to_name(&key))
                     }
-                    TomlKey::DottedKey(keys) => {
-                        current_table = match toml.get_mut(&keys[0]) {
-                            Some(TomlValue::Table(t)) => Some(t),
-                            _ => None,
-                        };
-                        for k in keys[1..].iter() {
-                            current_table = current_table.and_then(|map| match map.get_mut(k) {
-                                Some(TomlValue::Table(t)) => Some(t),
-                                _ => None,
-                            });
-                        }
+                    CheckResult::NotFound => {
+                        insert_key_value_to_map(current_table, &key, value, false);
                     }
+                    CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
                 }
             }
-            TomlExpression::ArrayTable(key) => {
-                match get_by_toml_key(&mut toml, &key) {
-                    Some(TomlValue::ArrayTable(a)) => {
-                        // keyが既に存在しても、ArrayTableの場合はエラーとしない
-                        a.push(HashMap::new());
+            TomlExpression::StdTable(key) => {
+                // エラー: 同じキーがtoml内に既に存在する
+                // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
+                match check_key(&toml, &key, true) {
+                    CheckResult::Found | CheckResult::ArrayTableFound => {
+                        panic!("key {} is already defined", key_to_name(&key))
                     }
-                    _ => {
-                        let empty_value = TomlValue::ArrayTable(vec![HashMap::new()]);
-                        let map = key_value_to_map(&key, &empty_value);
-                        toml = merge_maps(toml, map);
+                    CheckResult::NotFound => {
+                        insert_key_value_to_map(
+                            &mut toml,
+                            &key,
+                            TomlValue::Table(HashMap::new()),
+                            true,
+                        );
                     }
+                    CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
                 }
-                current_table = get_by_toml_key(&mut toml, &key).and_then(|v| match v {
-                    TomlValue::ArrayTable(a) => a.last_mut(),
-                    _ => None,
-                });
+                current_key = Some(key.clone());
+            }
+            TomlExpression::ArrayTable(key) => {
+                // エラー: 同じキーがtoml内に既に存在し、それがArrayTableではない
+                // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
+                match check_key(&toml, &key, true) {
+                    CheckResult::Found => panic!("key {} is already defined", key_to_name(&key)),
+                    CheckResult::ArrayTableFound => {
+                        let current_table = match get_by_key(&mut toml, &key, true) {
+                            GetResult::Found(TomlValue::ArrayTable(v)) => v,
+                            _ => unreachable!(),
+                        };
+                        current_table.push(HashMap::new());
+                    }
+                    CheckResult::NotFound => {
+                        insert_key_value_to_map(
+                            &mut toml,
+                            &key,
+                            TomlValue::ArrayTable(vec![HashMap::new()]),
+                            true,
+                        );
+                    }
+                    CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
+                }
+                current_key = Some(key.clone());
             }
         }
     }
@@ -122,33 +131,124 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     }
 }
 
-fn get_by_toml_key<'a>(
-    toml: &'a mut HashMap<String, TomlValue>,
+enum CheckResult {
+    Found,
+    ArrayTableFound,
+    NotFound,
+    Conflict(Vec<String>),
+}
+
+fn check_key(
+    toml: &HashMap<String, TomlValue>,
     key: &TomlKey,
-) -> Option<&'a mut TomlValue> {
+    allow_array_table: bool,
+) -> CheckResult {
     match key {
-        TomlKey::SimpleKey(k) => toml.get_mut(k),
+        TomlKey::SimpleKey(k) => match toml.get(k) {
+            Some(TomlValue::ArrayTable(_)) if allow_array_table => CheckResult::ArrayTableFound,
+            Some(_) => CheckResult::Found,
+            None => CheckResult::NotFound,
+        },
         TomlKey::DottedKey(keys) => {
-            let mut current = toml.get_mut(&keys[0]);
+            let mut current = toml.get(&keys[0]);
+            let mut subkey = vec![keys[0].clone()];
             for k in keys[1..].iter() {
-                current = current.and_then(|v| match v {
-                    TomlValue::Table(t) => t.get_mut(k),
-                    _ => None,
-                });
+                match current {
+                    None => return CheckResult::NotFound,
+                    Some(v) => match v {
+                        TomlValue::Table(_) => (),
+                        TomlValue::ArrayTable(_) if allow_array_table => (),
+                        _ => return CheckResult::Conflict(subkey),
+                    },
+                }
+                current = match current {
+                    Some(TomlValue::Table(v)) => v.get(k),
+                    Some(TomlValue::ArrayTable(v)) => v.last().unwrap().get(k),
+                    _ => unreachable!(),
+                };
+                subkey.push(k.clone());
             }
-            current
+            match current {
+                Some(TomlValue::ArrayTable(_)) if allow_array_table => CheckResult::ArrayTableFound,
+                Some(_) => CheckResult::Found,
+                None => CheckResult::NotFound,
+            }
         }
     }
 }
 
-fn key_value_to_map(key: &TomlKey, value: &TomlValue) -> HashMap<String, TomlValue> {
+enum GetResult<'a> {
+    Found(&'a mut TomlValue),
+    NotFound,
+    Conflict(Vec<String>),
+}
+
+fn get_by_key<'a>(
+    toml: &'a mut HashMap<String, TomlValue>,
+    key: &TomlKey,
+    allow_array_table: bool,
+) -> GetResult<'a> {
+    match key {
+        TomlKey::SimpleKey(k) => match toml.get_mut(k) {
+            Some(v) => GetResult::Found(v),
+            None => GetResult::NotFound,
+        },
+        TomlKey::DottedKey(keys) => {
+            let mut current = toml.get_mut(&keys[0]);
+            let mut subkey = vec![keys[0].clone()];
+            for k in keys[1..].iter() {
+                match current.as_ref() {
+                    None => return GetResult::NotFound,
+                    Some(v) => match v {
+                        TomlValue::Table(_) => (),
+                        TomlValue::ArrayTable(_) if allow_array_table => (),
+                        _ => return GetResult::Conflict(subkey),
+                    },
+                }
+                current = match current {
+                    Some(TomlValue::Table(t)) => t.get_mut(k),
+                    Some(TomlValue::ArrayTable(t)) => t.last_mut().unwrap().get_mut(k),
+                    _ => unreachable!(),
+                };
+                subkey.push(k.clone());
+            }
+            match current {
+                None => GetResult::NotFound,
+                Some(v) => GetResult::Found(v),
+            }
+        }
+    }
+}
+
+fn insert_key_value_to_map(
+    map: &mut HashMap<String, TomlValue>,
+    key: &TomlKey,
+    value: TomlValue,
+    allow_array_table: bool,
+) {
     match key {
         TomlKey::SimpleKey(k) => {
-            let mut map = HashMap::new();
-            map.insert(k.to_owned(), value.to_owned());
-            map
+            if map.contains_key(k) {
+                panic!("key {} is already exists", k);
+            }
+            map.insert(k.to_owned(), value);
         }
-        TomlKey::DottedKey(keys) => dotted_key_to_map(keys, value),
+        TomlKey::DottedKey(keys) => {
+            let mut tmp = map;
+            for k in keys.iter().take(keys.len() - 1) {
+                let entry = tmp.entry(k.to_owned());
+                match entry.or_insert_with(|| TomlValue::Table(HashMap::new())) {
+                    TomlValue::Table(t) => tmp = t,
+                    TomlValue::ArrayTable(t) if allow_array_table => tmp = t.last_mut().unwrap(),
+                    _ => panic!("key {} is already exists", k),
+                }
+            }
+            let k = keys.last().unwrap();
+            if tmp.contains_key(k) {
+                panic!("key {} is already exists", k);
+            }
+            tmp.insert(k.to_owned(), value);
+        }
     }
 }
 
@@ -157,30 +257,6 @@ fn key_to_name(key: &TomlKey) -> String {
         TomlKey::SimpleKey(k) => k.to_owned(),
         TomlKey::DottedKey(keys) => keys.join("."),
     }
-}
-
-pub fn merge_maps(
-    mut acc: HashMap<String, TomlValue>,
-    map: HashMap<String, TomlValue>,
-) -> HashMap<String, TomlValue> {
-    for (k, v) in map {
-        match (acc.remove(&k), v) {
-            (Some(TomlValue::Table(t1)), TomlValue::Table(t2)) => {
-                // kがaccに存在する場合、両者がTableの場合は再帰的にマージする
-                let t = merge_maps(t1, t2);
-                acc.insert(k, TomlValue::Table(t));
-            }
-            (Some(_), _) => {
-                // 少なくとも一方がTableでない場合はエラーとする
-                panic!("key {} is already defined", k);
-            }
-            (None, v) => {
-                // kがaccに存在しない場合は、単純に挿入すればよい
-                acc.insert(k, v);
-            }
-        }
-    }
-    acc
 }
 
 /// expression =  ws [ comment ]
@@ -228,33 +304,8 @@ fn parse_keyval(input: &str) -> IResult<&str, TomlExpression> {
     map(_parse_keyval, TomlExpression::KeyVal)(input)
 }
 
-fn _parse_keyval(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
-    match parse_key(input)? {
-        (input, TomlKey::SimpleKey(key)) => {
-            let (input, _) = parse_keyval_sep(input)?;
-            let (input, val) = parse_val(input)?;
-            let mut m = HashMap::new();
-            m.insert(key, val);
-            Ok((input, m))
-        }
-        (input, TomlKey::DottedKey(keys)) => {
-            let (input, _) = parse_keyval_sep(input)?;
-            let (input, val) = parse_val(input)?;
-            let m = dotted_key_to_map(&keys, &val);
-            Ok((input, m))
-        }
-    }
-}
-
-fn dotted_key_to_map(keys: &[String], value: &TomlValue) -> HashMap<String, TomlValue> {
-    let mut map = HashMap::new();
-    map.insert(keys.last().unwrap().clone(), value.to_owned());
-    for key in keys.iter().rev().skip(1) {
-        let mut t = HashMap::new();
-        t.insert(key.to_owned(), TomlValue::Table(map));
-        map = t;
-    }
-    map
+fn _parse_keyval(input: &str) -> IResult<&str, (TomlKey, TomlValue)> {
+    separated_pair(parse_key, parse_keyval_sep, parse_val)(input)
 }
 
 // keyval-sep = ws %x3D ws ; =
@@ -415,7 +466,7 @@ fn parse_escaped(input: &str) -> IResult<&str, &str> {
 /// ml-basic-string = ml-basic-string-delim [ newline ] ml-basic-body
 ///                   ml-basic-string-delim
 /// ml-basic-string-delim = 3quotation-mark
-pub fn parse_ml_basic_string(input: &str) -> IResult<&str, String> {
+fn parse_ml_basic_string(input: &str) -> IResult<&str, String> {
     delimited(
         tuple((tag("\"\"\""), opt(parse_newline))),
         parse_ml_basic_body,
@@ -454,7 +505,7 @@ fn parse_mlb_quotes(input: &str) -> IResult<&str, &str> {
 
 /// mlb-content = basic-char / newline / mlb-escaped-nl
 /// mlb-escaped-nl = escape ws newline *( wschar / newline )
-pub fn parse_mlb_content(input: &str) -> IResult<&str, &str> {
+fn parse_mlb_content(input: &str) -> IResult<&str, &str> {
     let result = alt((parse_basic_char, parse_newline))(input);
     if result.is_ok() {
         return result;
@@ -492,7 +543,7 @@ fn is_literal_char(c: char) -> bool {
 /// ml-literal-string = ml-literal-string-delim [ newline ] ml-literal-body
 ///                     ml-literal-string-delim
 /// ml-literal-string-delim = 3apostrophe
-pub fn parse_ml_literal_string(input: &str) -> IResult<&str, String> {
+fn parse_ml_literal_string(input: &str) -> IResult<&str, String> {
     map(
         delimited(
             tuple((tag("'''"), opt(parse_newline))),
@@ -513,12 +564,12 @@ fn parse_ml_literal_body(input: &str) -> IResult<&str, &str> {
 }
 
 /// mll-content = literal-char / newline
-pub fn parse_mll_content(input: &str) -> IResult<&str, &str> {
+fn parse_mll_content(input: &str) -> IResult<&str, &str> {
     alt((take_while_m_n(1, 1, is_literal_char), parse_newline))(input)
 }
 
 /// mll-quotes = 1*2apostrophe
-pub fn parse_mll_quotes(input: &str) -> IResult<&str, &str> {
+fn parse_mll_quotes(input: &str) -> IResult<&str, &str> {
     alt((
         recognize(tuple((tag("'"), not(tag("'"))))),
         recognize(tuple((tag("''"), not(tag("'"))))),
@@ -692,7 +743,7 @@ fn parse_boolean(input: &str) -> IResult<&str, TomlValue> {
 }
 
 /// date-time      = offset-date-time / local-date-time / local-date / local-time
-pub fn parse_date_time(input: &str) -> IResult<&str, TomlValue> {
+fn parse_date_time(input: &str) -> IResult<&str, TomlValue> {
     alt((
         parse_offset_date_time,
         parse_local_date_time,
@@ -795,7 +846,7 @@ fn parse_local_time(input: &str) -> IResult<&str, TomlValue> {
 ///
 /// array-open =  %x5B ; [
 /// array-close = %x5D ; ]
-pub fn parse_array(input: &str) -> IResult<&str, TomlValue> {
+fn parse_array(input: &str) -> IResult<&str, TomlValue> {
     map(
         delimited(
             tag("["),
@@ -848,7 +899,7 @@ fn parse_std_table(input: &str) -> IResult<&str, TomlExpression> {
 /// inline-table-open  = %x7B  ; {
 /// inline-table-close = %x7D  ; }
 /// inline-table-sep   = %x2C  ; , Comma
-pub fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
+fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
     map(
         delimited(
             tag("{"),
@@ -868,7 +919,11 @@ fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, Toml
         tuple((parse_ws_comment_newline, opt(tag(",")))),
     );
     map(many1(parse_inline_table_keyval), |v| {
-        v.into_iter().fold(HashMap::new(), merge_maps)
+        let mut result = HashMap::new();
+        for (k, v) in v {
+            insert_key_value_to_map(&mut result, &k, v, false);
+        }
+        result
     })(input)
 }
 
@@ -889,47 +944,6 @@ fn parse_array_table(input: &str) -> IResult<&str, TomlExpression> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_merge_maps() {
-        let m1 = HashMap::from([
-            (
-                "a".to_string(),
-                TomlValue::Table(HashMap::from([
-                    ("d".to_string(), TomlValue::Integer(1)),
-                    ("c".to_string(), TomlValue::Integer(2)),
-                ])),
-            ),
-            ("b".to_string(), TomlValue::Integer(2)),
-        ]);
-        let m2 = HashMap::from([
-            (
-                "a".to_string(),
-                TomlValue::Table(HashMap::from([
-                    ("a".to_string(), TomlValue::Integer(3)),
-                    ("b".to_string(), TomlValue::Integer(4)),
-                ])),
-            ),
-            ("c".to_string(), TomlValue::Integer(4)),
-        ]);
-        let m3 = merge_maps(m1, m2);
-        assert_eq!(
-            m3,
-            HashMap::from([
-                (
-                    "a".to_string(),
-                    TomlValue::Table(HashMap::from([
-                        ("a".to_string(), TomlValue::Integer(3)),
-                        ("b".to_string(), TomlValue::Integer(4)),
-                        ("c".to_string(), TomlValue::Integer(2)),
-                        ("d".to_string(), TomlValue::Integer(1)),
-                    ])),
-                ),
-                ("b".to_string(), TomlValue::Integer(2)),
-                ("c".to_string(), TomlValue::Integer(4)),
-            ])
-        );
-    }
 
     #[test]
     fn test_comment() {
@@ -1222,6 +1236,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
+    #[allow(clippy::excessive_precision)]
     fn test_parse_float() {
         assert_eq!(parse_float("+1.0"), Ok(("", TomlValue::Float(1.0))));
         assert_eq!(parse_float("3.1415"), Ok(("", TomlValue::Float(3.1415))));
@@ -1329,19 +1345,19 @@ mod tests {
                 )
             ))
         );
-        // assert_eq!(
-        //     parse_date_time("1979-05-27T00:32:00.999999"),
-        //     Ok((
-        //         "",
-        //         TomlValue::LocalDateTime(
-        //             NaiveDateTime::parse_from_str(
-        //                 "1979-05-27T00:32:00.999999",
-        //                 "%Y-%m-%dT%H:%M:%S%.f"
-        //             )
-        //             .unwrap()
-        //         )
-        //     ))
-        // );
+        assert_eq!(
+            parse_date_time("1979-05-27T00:32:00.999999"),
+            Ok((
+                "",
+                TomlValue::LocalDateTime(
+                    NaiveDateTime::parse_from_str(
+                        "1979-05-27T00:32:00.999999",
+                        "%Y-%m-%dT%H:%M:%S%.f"
+                    )
+                    .unwrap()
+                )
+            ))
+        );
     }
 
     #[test]
@@ -1740,7 +1756,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "key apple is already defined")]
+    #[should_panic(expected = "key fruit.apple is already defined")]
     fn test_duplicated_key_dotted() {
         parse_toml(
             r#"
@@ -1752,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "table a is already defined")]
+    #[should_panic(expected = "key a is already defined")]
     fn test_duplicated_table_name() {
         parse_toml(
             r#"
@@ -1767,7 +1783,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "table a.b is already defined")]
+    #[should_panic(expected = "key a.b is already defined")]
     fn test_duplicated_table_name2() {
         parse_toml(
             r#"
@@ -1782,7 +1798,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "table fruit.apple is already defined")]
+    #[should_panic(expected = "key fruit.apple is already defined")]
     fn test_duplicated_table_name3() {
         parse_toml(
             r#"
@@ -1797,7 +1813,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "table fruit.apple.taste is already defined")]
+    #[should_panic(expected = "key fruit.apple.taste is already defined")]
     fn test_duplicated_table_name4() {
         parse_toml(
             r#"
@@ -1887,7 +1903,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "key fruit.physical is already defined")]
     fn test_table_array_table() {
-        assert!(parse_toml(
+        parse_toml(
             r#"
             [fruit.physical]
             color = "red"
@@ -1897,6 +1913,6 @@ mod tests {
             color = "green"
             "#
         )
-        .is_err());
+        .unwrap();
     }
 }
