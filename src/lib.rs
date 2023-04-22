@@ -3,14 +3,12 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1, take_while_m_n},
     character::complete::{line_ending, one_of, space0},
-    combinator::{map, not, opt, peek, recognize},
+    combinator::{cut, map, not, opt, peek, recognize},
     multi::{many0, many1, many_m_n},
     sequence::{delimited, preceded, separated_pair, terminated, tuple},
     IResult,
 };
-use std::{collections::HashMap, iter};
-
-// type Toml = HashMap<String, TomlValue>;
+use std::{collections::HashMap, error, fmt, iter};
 
 #[derive(Debug, PartialEq, Clone)]
 enum TomlKey {
@@ -42,27 +40,60 @@ enum TomlExpression {
     ArrayTable(TomlKey),
 }
 
+#[derive(Debug, PartialEq)]
+pub enum TomlParserError {
+    NomError(String, nom::error::ErrorKind),
+    DuplicationError(String),
+}
+
+impl fmt::Display for TomlParserError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TomlParserError::NomError(e, ek) => {
+                write!(f, "nom error: input={}, ErrorKind={:?}", e, ek)
+            }
+            TomlParserError::DuplicationError(e) => write!(f, "duplication error: {}", e),
+        }
+    }
+}
+
+impl error::Error for TomlParserError {}
+
+impl<'a> From<nom::Err<nom::error::Error<&'a str>>> for TomlParserError {
+    fn from(e: nom::Err<nom::error::Error<&'a str>>) -> Self {
+        match e {
+            nom::Err::Error(e) => TomlParserError::NomError(e.input.to_string(), e.code),
+            nom::Err::Failure(e) => TomlParserError::NomError(e.input.to_string(), e.code),
+            nom::Err::Incomplete(_) => unreachable!(),
+        }
+    }
+}
+
 /// toml = expression *( newline expression )
-pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
+pub fn parse_toml(input: &str) -> Result<HashMap<String, TomlValue>, TomlParserError> {
     let (mut input, exp) = parse_expression(input)?;
     let mut toml = HashMap::new();
     let mut current_key = match exp {
-        Some(e) => add_expression_to_toml(&mut toml, None, e),
+        Some(e) => match add_expression_to_toml(&mut toml, None, e) {
+            Ok(k) => k,
+            Err(e) => return Err(e),
+        },
         None => None,
     };
     loop {
         input = match preceded(parse_newline, parse_expression)(input) {
             Ok((input, exp)) => {
                 if let Some(e) = exp {
-                    current_key = add_expression_to_toml(&mut toml, current_key, e);
+                    current_key = add_expression_to_toml(&mut toml, current_key, e)?;
                 }
                 input
             }
             Err(nom::Err::Failure(e)) => {
-                return Err(nom::Err::Failure(e));
+                return Err(nom::Err::Failure(e))?;
             }
-            Err(_) => {
-                break
+            Err(e) => {
+                println!("Error: {:?}", e);
+                break;
             }
         };
     }
@@ -70,12 +101,12 @@ pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
     // inputが空文字列でない場合はエラーとする
     // ToDo: 一部のケースでは、cut を使って nom::error::Failure を使えば普通のパーサーエラーに出来そう
     if input.is_empty() {
-        Ok((input, toml))
+        Ok(toml)
     } else {
-        Err(nom::Err::Error(nom::error::Error::new(
+        Err(nom::Err::Failure(nom::error::Error::new(
             input,
-            nom::error::ErrorKind::Eof, // ToDo: 適切なエラーコードを考える
-        )))
+            nom::error::ErrorKind::Fail,
+        )))?
     }
 }
 
@@ -83,7 +114,7 @@ fn add_expression_to_toml(
     toml: &mut HashMap<String, TomlValue>,
     current_key: Option<TomlKey>,
     exp: TomlExpression,
-) -> Option<TomlKey> {
+) -> Result<Option<TomlKey>, TomlParserError> {
     match exp {
         TomlExpression::KeyVal((key, value)) => {
             // エラー: 同じキーがcurrent_table内に既に存在する
@@ -98,34 +129,55 @@ fn add_expression_to_toml(
             };
             match check_key(current_table, &key, false) {
                 CheckResult::Found | CheckResult::ArrayTableFound => {
-                    panic!("key {} is already defined", key_to_name(&key))
+                    return Err(TomlParserError::DuplicationError(format!(
+                        "key {} is already defined",
+                        key_to_name(&key)
+                    )));
                 }
                 CheckResult::NotFound => {
                     insert_key_value_to_map(current_table, &key, value, false);
                 }
-                CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
+                CheckResult::Conflict(v) => {
+                    return Err(TomlParserError::DuplicationError(format!(
+                        "key {} is already defined",
+                        v.join(".")
+                    )));
+                }
             }
-            current_key
+            Ok(current_key)
         }
         TomlExpression::StdTable(key) => {
             // エラー: 同じキーがtoml内に既に存在する
             // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
             match check_key(toml, &key, true) {
                 CheckResult::Found | CheckResult::ArrayTableFound => {
-                    panic!("key {} is already defined", key_to_name(&key))
+                    return Err(TomlParserError::DuplicationError(format!(
+                        "key {} is already defined",
+                        key_to_name(&key)
+                    )));
                 }
                 CheckResult::NotFound => {
                     insert_key_value_to_map(toml, &key, TomlValue::Table(HashMap::new()), true);
                 }
-                CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
+                CheckResult::Conflict(v) => {
+                    return Err(TomlParserError::DuplicationError(format!(
+                        "key {} is already defined",
+                        v.join(".")
+                    )));
+                }
             }
-            Some(key)
+            Ok(Some(key))
         }
         TomlExpression::ArrayTable(key) => {
             // エラー: 同じキーがtoml内に既に存在し、それがArrayTableではない
             // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
             match check_key(toml, &key, true) {
-                CheckResult::Found => panic!("key {} is already defined", key_to_name(&key)),
+                CheckResult::Found => {
+                    return Err(TomlParserError::DuplicationError(format!(
+                        "key {} is already defined",
+                        key_to_name(&key)
+                    )));
+                }
                 CheckResult::ArrayTableFound => {
                     let current_table = match get_by_key(toml, &key, true) {
                         GetResult::Found(TomlValue::ArrayTable(v)) => v,
@@ -141,9 +193,14 @@ fn add_expression_to_toml(
                         true,
                     );
                 }
-                CheckResult::Conflict(v) => panic!("key {} is already defined", v.join(".")),
+                CheckResult::Conflict(v) => {
+                    return Err(TomlParserError::DuplicationError(format!(
+                        "key {} is already defined",
+                        v.join(".")
+                    )));
+                }
             }
-            Some(key)
+            Ok(Some(key))
         }
     }
 }
@@ -284,6 +341,7 @@ fn parse_expression(input: &str) -> IResult<&str, Option<TomlExpression>> {
     let r = terminated(alt((parse_keyval, parse_table)), parse_ws)(input);
     let (input, expression) = match r {
         Ok((input, kv)) => (input, Some(kv)),
+        Err(nom::Err::Failure(e)) => return Err(nom::Err::Failure(e)),
         Err(_) => (input, None),
     };
     let (input, _) = opt(parse_comment)(input)?;
@@ -322,7 +380,7 @@ fn parse_keyval(input: &str) -> IResult<&str, TomlExpression> {
 }
 
 fn _parse_keyval(input: &str) -> IResult<&str, (TomlKey, TomlValue)> {
-    separated_pair(parse_key, parse_keyval_sep, parse_val)(input)
+    separated_pair(parse_key, parse_keyval_sep, cut(parse_val))(input)
 }
 
 // keyval-sep = ws %x3D ws ; =
@@ -1579,19 +1637,16 @@ mod tests {
             key2 = 456
             "#
             ),
-            Ok((
-                "",
-                hashmap! {
-                    "table-1".to_string() => TomlValue::Table(hashmap!{
-                        "key1".to_string() => TomlValue::String("some string".to_string()),
-                        "key2".to_string() => TomlValue::Integer(123)
-                    }),
-                    "table_2".to_string() => TomlValue::Table(hashmap!{
-                        "key1".to_string() => TomlValue::String("another string".to_string()),
-                        "key2".to_string() => TomlValue::Integer(456)
-                    })
-                }
-            ))
+            Ok(hashmap! {
+                "table-1".to_string() => TomlValue::Table(hashmap!{
+                    "key1".to_string() => TomlValue::String("some string".to_string()),
+                    "key2".to_string() => TomlValue::Integer(123)
+                }),
+                "table_2".to_string() => TomlValue::Table(hashmap!{
+                    "key1".to_string() => TomlValue::String("another string".to_string()),
+                    "key2".to_string() => TomlValue::Integer(456)
+                })
+            })
         );
         assert_eq!(
             parse_toml(
@@ -1600,18 +1655,15 @@ mod tests {
             type.name = "pug"
             "#
             ),
-            Ok((
-                "",
-                hashmap! {
-                    "dog".to_string() => TomlValue::Table(hashmap!{
-                        "tater.man".to_string() => TomlValue::Table(hashmap!{
-                            "type".to_string() => TomlValue::Table(hashmap!{
-                                "name".to_string() => TomlValue::String("pug".to_string())
-                            })
+            Ok(hashmap! {
+                "dog".to_string() => TomlValue::Table(hashmap!{
+                    "tater.man".to_string() => TomlValue::Table(hashmap!{
+                        "type".to_string() => TomlValue::Table(hashmap!{
+                            "name".to_string() => TomlValue::String("pug".to_string())
                         })
                     })
-                }
-            ))
+                })
+            })
         )
     }
 
@@ -1633,23 +1685,20 @@ mod tests {
             color = "gray"
             "#
             ),
-            Ok((
-                "",
-                hashmap! {
-                    "products".to_string() => TomlValue::ArrayTable(vec![
-                        hashmap!{
-                            "name".to_string() => TomlValue::String("Hammer".to_string()),
-                            "sku".to_string() => TomlValue::Integer(738594937)
-                        },
-                        hashmap!{},
-                        hashmap!{
-                            "name".to_string() => TomlValue::String("Nail".to_string()),
-                            "sku".to_string() => TomlValue::Integer(284758393),
-                            "color".to_string() => TomlValue::String("gray".to_string())
-                        }
-                    ])
-                }
-            ))
+            Ok(hashmap! {
+                "products".to_string() => TomlValue::ArrayTable(vec![
+                    hashmap!{
+                        "name".to_string() => TomlValue::String("Hammer".to_string()),
+                        "sku".to_string() => TomlValue::Integer(738594937)
+                    },
+                    hashmap!{},
+                    hashmap!{
+                        "name".to_string() => TomlValue::String("Nail".to_string()),
+                        "sku".to_string() => TomlValue::Integer(284758393),
+                        "color".to_string() => TomlValue::String("gray".to_string())
+                    }
+                ])
+            })
         )
     }
 
@@ -1678,36 +1727,33 @@ mod tests {
                 name = "plantain"
             "#
             ),
-            Ok((
-                "",
-                hashmap! {
-                    "fruit".to_string() => TomlValue::ArrayTable(vec![
-                        hashmap!{
-                            "name".to_string() => TomlValue::String("apple".to_string()),
-                            "physical".to_string() => TomlValue::Table(hashmap!{
-                                "color".to_string() => TomlValue::String("red".to_string()),
-                                "shape".to_string() => TomlValue::String("round".to_string())
-                            }),
-                            "variety".to_string() => TomlValue::ArrayTable(vec![
-                                hashmap!{
-                                    "name".to_string() => TomlValue::String("red delicious".to_string())
-                                },
-                                hashmap!{
-                                    "name".to_string() => TomlValue::String("granny smith".to_string())
-                                }
-                            ])
-                        },
-                        hashmap!{
-                            "name".to_string() => TomlValue::String("banana".to_string()),
-                            "variety".to_string() => TomlValue::ArrayTable(vec![
-                                hashmap!{
-                                    "name".to_string() => TomlValue::String("plantain".to_string())
-                                }
-                            ])
-                        }
-                    ])
-                }
-            ))
+            Ok(hashmap! {
+                "fruit".to_string() => TomlValue::ArrayTable(vec![
+                    hashmap!{
+                        "name".to_string() => TomlValue::String("apple".to_string()),
+                        "physical".to_string() => TomlValue::Table(hashmap!{
+                            "color".to_string() => TomlValue::String("red".to_string()),
+                            "shape".to_string() => TomlValue::String("round".to_string())
+                        }),
+                        "variety".to_string() => TomlValue::ArrayTable(vec![
+                            hashmap!{
+                                "name".to_string() => TomlValue::String("red delicious".to_string())
+                            },
+                            hashmap!{
+                                "name".to_string() => TomlValue::String("granny smith".to_string())
+                            }
+                        ])
+                    },
+                    hashmap!{
+                        "name".to_string() => TomlValue::String("banana".to_string()),
+                        "variety".to_string() => TomlValue::ArrayTable(vec![
+                            hashmap!{
+                                "name".to_string() => TomlValue::String("plantain".to_string())
+                            }
+                        ])
+                    }
+                ])
+            })
         )
     }
 
@@ -1719,187 +1765,210 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "key name is already defined")]
     fn test_duplicated_key() {
-        parse_toml(
-            r#"
-            name = "Tom"
-            name = "Pradyun"
-            "#,
-        )
-        .unwrap();
+        assert_eq!(
+            parse_toml(
+                r#"
+                name = "Tom"
+                name = "Pradyun"
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key name is already defined".to_string()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "key spelling is already defined")]
     fn test_duplicated_key_quoted() {
-        parse_toml(
-            r#"
-            spelling = "favorite"
-            "spelling" = "favourite"
-            "#,
-        )
-        .unwrap();
+        assert_eq!(
+            parse_toml(
+                r#"
+                spelling = "favorite"
+                "spelling" = "favourite"
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key spelling is already defined".to_string()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "key fruit.apple is already defined")]
     fn test_duplicated_key_dotted() {
-        parse_toml(
-            r#"
-            fruit.apple = 1
-            fruit.apple.smooth = true
-            "#,
-        )
-        .unwrap();
+        assert_eq!(
+            parse_toml(
+                r#"
+                fruit.apple = 1
+                fruit.apple.smooth = true
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key fruit.apple is already defined".to_string()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "key a is already defined")]
     fn test_duplicated_table_name() {
-        parse_toml(
-            r#"
-            [a]
-            b = 1
-
-            [a]
-            c = 2
-            "#,
-        )
-        .unwrap();
+        assert_eq!(
+            parse_toml(
+                r#"
+                [a]
+                b = 1
+                
+                [a]
+                c = 2
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key a is already defined".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_toml(
+                r#"
+                [a]
+                b = 1
+                
+                [a.b]
+                c = 2
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key a.b is already defined".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_toml(
+                r#"
+                [fruit]
+                apple.color = "red"
+                apple.taste.sweet = true
+                
+                [fruit.apple]
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key fruit.apple is already defined".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_toml(
+                r#"
+                [fruit]
+                apple.color = "red"
+                apple.taste.sweet = true
+                
+                [fruit.apple.taste]
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key fruit.apple.taste is already defined".to_string()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "key a.b is already defined")]
-    fn test_duplicated_table_name2() {
-        parse_toml(
-            r#"
-            [a]
-            b = 1
-
-            [a.b]
-            c = 2
-            "#,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "key fruit.apple is already defined")]
-    fn test_duplicated_table_name3() {
-        parse_toml(
-            r#"
-            [fruit]
-            apple.color = "red"
-            apple.taste.sweet = true
-
-            [fruit.apple]
-            "#,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "key fruit.apple.taste is already defined")]
-    fn test_duplicated_table_name4() {
-        parse_toml(
-            r#"
-            [fruit]
-            apple.color = "red"
-            apple.taste.sweet = true
-
-            [fruit.apple.taste]
-            "#,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "key type is already defined")]
     fn test_inline_table_and_sub_table() {
-        parse_toml(
-            r#"
-            [product]
-            type = { name = "Nail" }
-            type.edible = false
-            "#,
-        )
-        .unwrap();
+        assert_eq!(
+            parse_toml(
+                r#"
+                [product]
+                type = { name = "Nail" }
+                type.edible = false
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key type is already defined".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_toml(
+                r#"
+                [product]
+                type.name = "Nail"
+                type = { edible = false }
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key type is already defined".to_string()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "key type is already defined")]
-    fn test_sub_table_inline_table() {
-        parse_toml(
-            r#"
-            [product]
-            type.name = "Nail"
-            type = { edible = false }
-            "#,
-        )
-        .unwrap();
+    fn test_sub_table_and_array_table() {
+        assert_eq!(
+            parse_toml(
+                r#"
+                [fruit.physical]
+                color = "red"
+                shape = "round"
+                
+                [[fruit]]
+                name = "apple"
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key fruit is already defined".to_string()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "key fruit is already defined")]
-    fn test_sub_table_array_table() {
-        parse_toml(
-            r#"
-            [fruit.physical]
-            color = "red"
-            shape = "round"
-
-            [[fruit]]
-            name = "apple"
-            "#,
-        )
-        .unwrap();
+    fn test_array_and_array_table() {
+        assert_eq!(
+            parse_toml(
+                r#"
+                fruit = []
+                
+                [[fruit]]
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key fruit is already defined".to_string()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "key fruit is already defined")]
-    fn test_array_array_table() {
-        parse_toml(
-            r#"
-            fruit = []
-
-            [[fruit]]
-            "#,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "key fruit.variety is already defined")]
     fn test_array_table_table() {
-        parse_toml(
-            r#"
-            [[fruit]]
-            name = "apple"
-
-            [[fruit.variety]]
-            name = "red delicious"
-
-            [fruit.variety]
-            name = "granny smith"
-            "#,
-        )
-        .unwrap();
+        assert_eq!(
+            parse_toml(
+                r#"
+                [[fruit]]
+                name = "apple"
+                
+                [[fruit.variety]]
+                name = "red delicious"
+                
+                [fruit.variety]
+                name = "granny smith"
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key fruit.variety is already defined".to_string()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "key fruit.physical is already defined")]
     fn test_table_array_table() {
-        parse_toml(
-            r#"
-            [fruit.physical]
-            color = "red"
-            shape = "round"
-
-            [[fruit.physical]]
-            color = "green"
-            "#,
-        )
-        .unwrap();
+        assert_eq!(
+            parse_toml(
+                r#"
+                [fruit.physical]
+                color = "red"
+                shape = "round"
+                
+                [[fruit.physical]]
+                color = "green"
+                "#,
+            ),
+            Err(TomlParserError::DuplicationError(
+                "key fruit.physical is already defined".to_string()
+            ))
+        );
     }
 }
