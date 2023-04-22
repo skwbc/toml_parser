@@ -44,14 +44,27 @@ enum TomlExpression {
 
 /// toml = expression *( newline expression )
 pub fn parse_toml(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
-    let (input, exp) = parse_expression(input)?;
-    // ToDo: many0を使うのではなく、forループ内で毎回precededを呼び出すようにすれば、どの時点でエラーが発生したかを明確にできる
-    let (input, vec_exp) = many0(preceded(parse_newline, parse_expression))(input)?;
-
+    let (mut input, exp) = parse_expression(input)?;
     let mut toml = HashMap::new();
-    let mut current_key = None;
-    for exp in iter::once(exp).chain(vec_exp.into_iter()).flatten() {
-        current_key = add_expression_to_toml(&mut toml, current_key, exp);
+    let mut current_key = match exp {
+        Some(e) => add_expression_to_toml(&mut toml, None, e),
+        None => None,
+    };
+    loop {
+        input = match preceded(parse_newline, parse_expression)(input) {
+            Ok((input, exp)) => {
+                if let Some(e) = exp {
+                    current_key = add_expression_to_toml(&mut toml, current_key, e);
+                }
+                input
+            }
+            Err(nom::Err::Failure(e)) => {
+                return Err(nom::Err::Failure(e));
+            }
+            Err(_) => {
+                break
+            }
+        };
     }
 
     // inputが空文字列でない場合はエラーとする
