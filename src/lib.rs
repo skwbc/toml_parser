@@ -16,7 +16,6 @@ enum TomlKey {
     DottedKey(Vec<String>),
 }
 
-/// date-time      = offset-date-time / local-date-time / local-date / local-time
 #[derive(Debug, PartialEq, Clone)]
 pub enum TomlValue {
     String(String),
@@ -73,19 +72,20 @@ impl<'a> From<nom::Err<nom::error::Error<&'a str>>> for TomlParserError {
 pub fn parse_toml(input: &str) -> Result<HashMap<String, TomlValue>, TomlParserError> {
     let (mut input, exp) = parse_expression(input)?;
     let mut toml = HashMap::new();
-    let mut current_key = match exp {
-        Some(e) => match add_expression_to_toml(&mut toml, None, e) {
-            Ok(k) => k,
-            Err(e) => return Err(e),
-        },
-        None => None,
+    let mut current_table = match exp {
+        Some(e) => add_expression_to_toml(&mut toml, e)?,
+        None => &mut toml,
     };
     loop {
         input = match preceded(parse_newline, parse_expression)(input) {
             Ok((input, exp)) => {
-                if let Some(e) = exp {
-                    current_key = add_expression_to_toml(&mut toml, current_key, e)?;
+                if let Some(TomlExpression::StdTable(_) | TomlExpression::ArrayTable(_)) = exp {
+                    current_table = &mut toml;
                 }
+                current_table = match exp {
+                    Some(e) => add_expression_to_toml(current_table, e)?,
+                    None => current_table,
+                };
                 input
             }
             Err(nom::Err::Failure(e)) => {
@@ -112,224 +112,96 @@ pub fn parse_toml(input: &str) -> Result<HashMap<String, TomlValue>, TomlParserE
 
 fn add_expression_to_toml(
     toml: &mut HashMap<String, TomlValue>,
-    current_key: Option<TomlKey>,
     exp: TomlExpression,
-) -> Result<Option<TomlKey>, TomlParserError> {
+) -> Result<&mut HashMap<String, TomlValue>, TomlParserError> {
     match exp {
         TomlExpression::KeyVal((key, value)) => {
-            // エラー: 同じキーがcurrent_table内に既に存在する
-            // エラー: dotted-keyの途中の階層のキーがcurrent_table内に既に存在するがそれがTableではない
-            let current_table = match current_key {
-                Some(ref key) => match get_by_key(toml, key, true) {
-                    GetResult::Found(TomlValue::Table(v)) => v,
-                    GetResult::Found(TomlValue::ArrayTable(v)) => v.last_mut().unwrap(),
-                    _ => unreachable!(),
-                },
-                None => toml,
-            };
-            match check_key(current_table, &key, false) {
-                CheckResult::Found | CheckResult::ArrayTableFound => {
-                    return Err(TomlParserError::DuplicationError(format!(
-                        "key {} is already defined",
-                        key_to_name(&key)
-                    )));
-                }
-                CheckResult::NotFound => {
-                    insert_key_value_to_map(current_table, &key, value, false);
-                }
-                CheckResult::Conflict(v) => {
-                    return Err(TomlParserError::DuplicationError(format!(
-                        "key {} is already defined",
-                        v.join(".")
-                    )));
-                }
-            }
-            Ok(current_key)
+            add_to_toml(toml, key, value)?;
+            Ok(toml)
         }
-        TomlExpression::StdTable(key) => {
-            // エラー: 同じキーがtoml内に既に存在する
-            // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
-            match check_key(toml, &key, true) {
-                CheckResult::Found | CheckResult::ArrayTableFound => {
-                    return Err(TomlParserError::DuplicationError(format!(
-                        "key {} is already defined",
-                        key_to_name(&key)
-                    )));
-                }
-                CheckResult::NotFound => {
-                    insert_key_value_to_map(toml, &key, TomlValue::Table(HashMap::new()), true);
-                }
-                CheckResult::Conflict(v) => {
-                    return Err(TomlParserError::DuplicationError(format!(
-                        "key {} is already defined",
-                        v.join(".")
-                    )));
-                }
-            }
-            Ok(Some(key))
-        }
+        TomlExpression::StdTable(key) => add_to_toml(toml, key, TomlValue::Table(HashMap::new())),
         TomlExpression::ArrayTable(key) => {
-            // エラー: 同じキーがtoml内に既に存在し、それがArrayTableではない
-            // エラー: dotted-keyの途中の階層のキーが既に存在するがそれがTableもしくはArrayTableではない
-            match check_key(toml, &key, true) {
-                CheckResult::Found => {
-                    return Err(TomlParserError::DuplicationError(format!(
-                        "key {} is already defined",
-                        key_to_name(&key)
-                    )));
-                }
-                CheckResult::ArrayTableFound => {
-                    let current_table = match get_by_key(toml, &key, true) {
-                        GetResult::Found(TomlValue::ArrayTable(v)) => v,
-                        _ => unreachable!(),
-                    };
-                    current_table.push(HashMap::new());
-                }
-                CheckResult::NotFound => {
-                    insert_key_value_to_map(
-                        toml,
-                        &key,
-                        TomlValue::ArrayTable(vec![HashMap::new()]),
-                        true,
-                    );
-                }
-                CheckResult::Conflict(v) => {
-                    return Err(TomlParserError::DuplicationError(format!(
-                        "key {} is already defined",
-                        v.join(".")
-                    )));
-                }
-            }
-            Ok(Some(key))
+            add_to_toml(toml, key, TomlValue::ArrayTable(vec![HashMap::new()]))
         }
     }
 }
 
-enum CheckResult {
-    Found,
-    ArrayTableFound,
-    NotFound,
-    Conflict(Vec<String>),
-}
-
-fn check_key(
-    toml: &HashMap<String, TomlValue>,
-    key: &TomlKey,
-    allow_array_table: bool,
-) -> CheckResult {
-    match key {
-        TomlKey::SimpleKey(k) => match toml.get(k) {
-            Some(TomlValue::ArrayTable(_)) if allow_array_table => CheckResult::ArrayTableFound,
-            Some(_) => CheckResult::Found,
-            None => CheckResult::NotFound,
-        },
-        TomlKey::DottedKey(keys) => {
-            let mut current = toml.get(&keys[0]);
-            let mut subkey = vec![keys[0].clone()];
-            for k in keys[1..].iter() {
-                match current {
-                    None => return CheckResult::NotFound,
-                    Some(v) => match v {
-                        TomlValue::Table(_) => (),
-                        TomlValue::ArrayTable(_) if allow_array_table => (),
-                        _ => return CheckResult::Conflict(subkey),
-                    },
-                }
-                current = match current {
-                    Some(TomlValue::Table(v)) => v.get(k),
-                    Some(TomlValue::ArrayTable(v)) => v.last().unwrap().get(k),
-                    _ => unreachable!(),
-                };
-                subkey.push(k.clone());
-            }
-            match current {
-                Some(TomlValue::ArrayTable(_)) if allow_array_table => CheckResult::ArrayTableFound,
-                Some(_) => CheckResult::Found,
-                None => CheckResult::NotFound,
-            }
-        }
-    }
-}
-
-enum GetResult<'a> {
-    Found(&'a mut TomlValue),
-    NotFound,
-    Conflict(Vec<String>),
-}
-
-fn get_by_key<'a>(
-    toml: &'a mut HashMap<String, TomlValue>,
-    key: &TomlKey,
-    allow_array_table: bool,
-) -> GetResult<'a> {
-    match key {
-        TomlKey::SimpleKey(k) => match toml.get_mut(k) {
-            Some(v) => GetResult::Found(v),
-            None => GetResult::NotFound,
-        },
-        TomlKey::DottedKey(keys) => {
-            let mut current = toml.get_mut(&keys[0]);
-            let mut subkey = vec![keys[0].clone()];
-            for k in keys[1..].iter() {
-                match current.as_ref() {
-                    None => return GetResult::NotFound,
-                    Some(v) => match v {
-                        TomlValue::Table(_) => (),
-                        TomlValue::ArrayTable(_) if allow_array_table => (),
-                        _ => return GetResult::Conflict(subkey),
-                    },
-                }
-                current = match current {
-                    Some(TomlValue::Table(t)) => t.get_mut(k),
-                    Some(TomlValue::ArrayTable(t)) => t.last_mut().unwrap().get_mut(k),
-                    _ => unreachable!(),
-                };
-                subkey.push(k.clone());
-            }
-            match current {
-                None => GetResult::NotFound,
-                Some(v) => GetResult::Found(v),
-            }
-        }
-    }
-}
-
-fn insert_key_value_to_map(
-    map: &mut HashMap<String, TomlValue>,
-    key: &TomlKey,
+fn _add_to_toml(
+    toml: &mut HashMap<String, TomlValue>,
+    key: String,
     value: TomlValue,
-    allow_array_table: bool,
-) {
-    match key {
-        TomlKey::SimpleKey(k) => {
-            if map.contains_key(k) {
-                panic!("key {} is already exists", k);
+) -> Result<&mut HashMap<String, TomlValue>, TomlParserError> {
+    match (toml.contains_key(&key), value) {
+        (true, TomlValue::ArrayTable(_)) => match toml.get_mut(&key).unwrap() {
+            TomlValue::ArrayTable(v) => {
+                v.push(HashMap::new());
+                Ok(v.last_mut().unwrap())
             }
-            map.insert(k.to_owned(), value);
+            _ => Err(TomlParserError::DuplicationError(format!(
+                "key {} is already defined",
+                key
+            ))),
+        },
+        (true, _) => Err(TomlParserError::DuplicationError(format!(
+            "key {} is already defined",
+            key
+        ))),
+        (false, array_table @ TomlValue::ArrayTable(_)) => {
+            toml.insert(key.to_owned(), array_table);
+            match toml.get_mut(&key).unwrap() {
+                TomlValue::ArrayTable(v) => Ok(v.last_mut().unwrap()),
+                _ => unreachable!(),
+            }
         }
-        TomlKey::DottedKey(keys) => {
-            let mut tmp = map;
-            for k in keys.iter().take(keys.len() - 1) {
-                let entry = tmp.entry(k.to_owned());
-                match entry.or_insert_with(|| TomlValue::Table(HashMap::new())) {
-                    TomlValue::Table(t) => tmp = t,
-                    TomlValue::ArrayTable(t) if allow_array_table => tmp = t.last_mut().unwrap(),
-                    _ => panic!("key {} is already exists", k),
-                }
+        (false, table @ TomlValue::Table(_)) => {
+            toml.insert(key.to_owned(), table);
+            match toml.get_mut(&key).unwrap() {
+                TomlValue::Table(t) => Ok(t),
+                _ => unreachable!(),
             }
-            let k = keys.last().unwrap();
-            if tmp.contains_key(k) {
-                panic!("key {} is already exists", k);
-            }
-            tmp.insert(k.to_owned(), value);
+        }
+        (false, value) => {
+            toml.insert(key, value);
+            Ok(toml)
         }
     }
 }
 
-fn key_to_name(key: &TomlKey) -> String {
+fn add_to_toml(
+    toml: &mut HashMap<String, TomlValue>,
+    key: TomlKey,
+    value: TomlValue,
+) -> Result<&mut HashMap<String, TomlValue>, TomlParserError> {
+    let allow_array_table = matches!(value, TomlValue::Table(_) | TomlValue::ArrayTable(_));
     match key {
-        TomlKey::SimpleKey(k) => k.to_owned(),
-        TomlKey::DottedKey(keys) => keys.join("."),
+        TomlKey::SimpleKey(key) => _add_to_toml(toml, key, value),
+        TomlKey::DottedKey(keys) => {
+            let mut current = toml;
+            let mut subkey = Vec::new();
+            for k in keys[..keys.len() - 1].iter() {
+                subkey.push(k.clone());
+                current
+                    .entry(k.clone())
+                    .or_insert_with(|| TomlValue::Table(HashMap::new()));
+                current = match current.get_mut(k) {
+                    Some(TomlValue::Table(t)) => t,
+                    Some(TomlValue::ArrayTable(v)) if allow_array_table => v.last_mut().unwrap(),
+                    _ => {
+                        return Err(TomlParserError::DuplicationError(format!(
+                            "key {} is already defined",
+                            subkey.join(".")
+                        )));
+                    }
+                };
+            }
+            match _add_to_toml(current, keys.last().unwrap().clone(), value) {
+                Ok(t) => Ok(t),
+                Err(_) => Err(TomlParserError::DuplicationError(format!(
+                    "key {} is already defined",
+                    keys.join(".")
+                ))),
+            }
+        }
     }
 }
 
@@ -996,7 +868,7 @@ fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, Toml
     map(many1(parse_inline_table_keyval), |v| {
         let mut result = HashMap::new();
         for (k, v) in v {
-            insert_key_value_to_map(&mut result, &k, v, false);
+            add_to_toml(&mut result, k, v).unwrap();
         }
         result
     })(input)
