@@ -4,11 +4,12 @@ use nom::{
     bytes::complete::{tag, tag_no_case, take_while, take_while1, take_while_m_n},
     character::complete::{line_ending, one_of, space0},
     combinator::{cut, map, not, opt, peek, recognize},
+    error::{ErrorKind, ParseError},
     multi::{many0, many1, many_m_n},
     sequence::{delimited, preceded, separated_pair, terminated, tuple},
     IResult,
 };
-use std::{collections::HashMap, error, fmt, iter};
+use std::{collections::HashMap, iter};
 
 #[derive(Debug, PartialEq, Clone)]
 enum TomlKey {
@@ -45,31 +46,20 @@ pub enum TomlParserError {
     DuplicationError(String),
 }
 
-impl fmt::Display for TomlParserError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            TomlParserError::NomError(e, ek) => {
-                write!(f, "nom error: input={}, ErrorKind={:?}", e, ek)
-            }
-            TomlParserError::DuplicationError(e) => write!(f, "duplication error: {}", e),
-        }
+impl ParseError<&str> for TomlParserError {
+    fn from_error_kind(input: &str, kind: ErrorKind) -> Self {
+        TomlParserError::NomError(input.to_string(), kind)
+    }
+
+    fn append(_: &str, _: ErrorKind, other: Self) -> Self {
+        other
     }
 }
 
-impl error::Error for TomlParserError {}
-
-impl<'a> From<nom::Err<nom::error::Error<&'a str>>> for TomlParserError {
-    fn from(e: nom::Err<nom::error::Error<&'a str>>) -> Self {
-        match e {
-            nom::Err::Error(e) => TomlParserError::NomError(e.input.to_string(), e.code),
-            nom::Err::Failure(e) => TomlParserError::NomError(e.input.to_string(), e.code),
-            nom::Err::Incomplete(_) => unreachable!(),
-        }
-    }
-}
+type MyResult<I, O> = IResult<I, O, TomlParserError>;
 
 /// toml = expression *( newline expression )
-pub fn parse_toml(input: &str) -> Result<HashMap<String, TomlValue>, TomlParserError> {
+pub fn parse_toml(input: &str) -> MyResult<&str, HashMap<String, TomlValue>> {
     let (mut input, exp) = parse_expression(input)?;
     let mut toml = HashMap::new();
     let mut current_table = match exp {
@@ -101,11 +91,11 @@ pub fn parse_toml(input: &str) -> Result<HashMap<String, TomlValue>, TomlParserE
     // inputが空文字列でない場合はエラーとする
     // ToDo: 一部のケースでは、cut を使って nom::error::Failure を使えば普通のパーサーエラーに出来そう
     if input.is_empty() {
-        Ok(toml)
+        Ok((input, toml))
     } else {
-        Err(nom::Err::Failure(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
+        Err(nom::Err::Failure(TomlParserError::NomError(
+            input.to_string(),
+            ErrorKind::Eof,
         )))?
     }
 }
@@ -113,7 +103,7 @@ pub fn parse_toml(input: &str) -> Result<HashMap<String, TomlValue>, TomlParserE
 fn add_expression_to_toml(
     toml: &mut HashMap<String, TomlValue>,
     exp: TomlExpression,
-) -> Result<&mut HashMap<String, TomlValue>, TomlParserError> {
+) -> Result<&mut HashMap<String, TomlValue>, nom::Err<TomlParserError>> {
     match exp {
         TomlExpression::KeyVal((key, value)) => {
             add_to_toml(toml, key, value)?;
@@ -130,21 +120,19 @@ fn _add_to_toml(
     toml: &mut HashMap<String, TomlValue>,
     key: String,
     value: TomlValue,
-) -> Result<&mut HashMap<String, TomlValue>, TomlParserError> {
+) -> Result<&mut HashMap<String, TomlValue>, nom::Err<TomlParserError>> {
     match (toml.contains_key(&key), value) {
         (true, TomlValue::ArrayTable(_)) => match toml.get_mut(&key).unwrap() {
             TomlValue::ArrayTable(v) => {
                 v.push(HashMap::new());
                 Ok(v.last_mut().unwrap())
             }
-            _ => Err(TomlParserError::DuplicationError(format!(
-                "key {} is already defined",
-                key
+            _ => Err(nom::Err::Failure(TomlParserError::DuplicationError(
+                format!("key {} is already defined", key),
             ))),
         },
-        (true, _) => Err(TomlParserError::DuplicationError(format!(
-            "key {} is already defined",
-            key
+        (true, _) => Err(nom::Err::Failure(TomlParserError::DuplicationError(
+            format!("key {} is already defined", key),
         ))),
         (false, array_table @ TomlValue::ArrayTable(_)) => {
             toml.insert(key.to_owned(), array_table);
@@ -171,7 +159,7 @@ fn add_to_toml(
     toml: &mut HashMap<String, TomlValue>,
     key: TomlKey,
     value: TomlValue,
-) -> Result<&mut HashMap<String, TomlValue>, TomlParserError> {
+) -> Result<&mut HashMap<String, TomlValue>, nom::Err<TomlParserError>> {
     let allow_array_table = matches!(value, TomlValue::Table(_) | TomlValue::ArrayTable(_));
     match key {
         TomlKey::SimpleKey(key) => _add_to_toml(toml, key, value),
@@ -187,18 +175,16 @@ fn add_to_toml(
                     Some(TomlValue::Table(t)) => t,
                     Some(TomlValue::ArrayTable(v)) if allow_array_table => v.last_mut().unwrap(),
                     _ => {
-                        return Err(TomlParserError::DuplicationError(format!(
-                            "key {} is already defined",
-                            subkey.join(".")
+                        return Err(nom::Err::Failure(TomlParserError::DuplicationError(
+                            format!("key {} is already defined", subkey.join(".")),
                         )));
                     }
                 };
             }
             match _add_to_toml(current, keys.last().unwrap().clone(), value) {
                 Ok(t) => Ok(t),
-                Err(_) => Err(TomlParserError::DuplicationError(format!(
-                    "key {} is already defined",
-                    keys.join(".")
+                Err(_) => Err(nom::Err::Failure(TomlParserError::DuplicationError(
+                    format!("key {} is already defined", keys.join(".")),
                 ))),
             }
         }
@@ -208,7 +194,7 @@ fn add_to_toml(
 /// expression =  ws [ comment ]
 /// expression =/ ws keyval ws [ comment ]
 /// expression =/ ws table ws [ comment ]
-fn parse_expression(input: &str) -> IResult<&str, Option<TomlExpression>> {
+fn parse_expression(input: &str) -> MyResult<&str, Option<TomlExpression>> {
     let (input, _) = parse_ws(input)?;
     let r = terminated(alt((parse_keyval, parse_table)), parse_ws)(input);
     let (input, expression) = match r {
@@ -223,13 +209,13 @@ fn parse_expression(input: &str) -> IResult<&str, Option<TomlExpression>> {
 /// ws = *wschar
 /// wschar =  %x20  ; Space
 /// wschar =/ %x09  ; Horizontal tab
-fn parse_ws(input: &str) -> IResult<&str, &str> {
+fn parse_ws(input: &str) -> MyResult<&str, &str> {
     space0(input)
 }
 
 /// newline =  %x0A     ; LF
 /// newline =/ %x0D.0A  ; CRLF
-fn parse_newline(input: &str) -> IResult<&str, &str> {
+fn parse_newline(input: &str) -> MyResult<&str, &str> {
     line_ending(input)
 }
 
@@ -237,7 +223,7 @@ fn parse_newline(input: &str) -> IResult<&str, &str> {
 /// comment-start-symbol = %x23 ; #
 /// allowed-comment-char = %x01-09 / %x0E-7F / non-ascii
 /// non-ascii = %x80-D7FF / %xE000-10FFFF
-fn parse_comment(input: &str) -> IResult<&str, &str> {
+fn parse_comment(input: &str) -> MyResult<&str, &str> {
     recognize(tuple((
         tag("#"),
         take_while(
@@ -247,26 +233,26 @@ fn parse_comment(input: &str) -> IResult<&str, &str> {
 }
 
 /// keyval = key keyval-sep val
-fn parse_keyval(input: &str) -> IResult<&str, TomlExpression> {
+fn parse_keyval(input: &str) -> MyResult<&str, TomlExpression> {
     map(_parse_keyval, TomlExpression::KeyVal)(input)
 }
 
-fn _parse_keyval(input: &str) -> IResult<&str, (TomlKey, TomlValue)> {
+fn _parse_keyval(input: &str) -> MyResult<&str, (TomlKey, TomlValue)> {
     separated_pair(parse_key, parse_keyval_sep, cut(parse_val))(input)
 }
 
 // keyval-sep = ws %x3D ws ; =
-fn parse_keyval_sep(input: &str) -> IResult<&str, &str> {
+fn parse_keyval_sep(input: &str) -> MyResult<&str, &str> {
     recognize(tuple((parse_ws, tag("="), parse_ws)))(input)
 }
 
 /// key = simple-key / dotted-key
-fn parse_key(input: &str) -> IResult<&str, TomlKey> {
+fn parse_key(input: &str) -> MyResult<&str, TomlKey> {
     alt((parse_dotted_key, parse_simple_key))(input)
 }
 
 /// val = string / boolean / array / inline-table / date-time / float / integer
-fn parse_val(input: &str) -> IResult<&str, TomlValue> {
+fn parse_val(input: &str) -> MyResult<&str, TomlValue> {
     alt((
         parse_string,
         parse_boolean,
@@ -279,18 +265,18 @@ fn parse_val(input: &str) -> IResult<&str, TomlValue> {
 }
 
 /// simple-key = quoted-key / unquoted-key
-fn parse_simple_key(input: &str) -> IResult<&str, TomlKey> {
+fn parse_simple_key(input: &str) -> MyResult<&str, TomlKey> {
     // map(alt((parse_quoted_key, parse_unquoted_key)), TomlKey::SimpleKey)(input)
     map(_parse_simple_key, TomlKey::SimpleKey)(input)
 }
 
 /// simple-keyをパースするが、TomlKey::SimpleKeyでラップせずStringを返す
-fn _parse_simple_key(input: &str) -> IResult<&str, String> {
+fn _parse_simple_key(input: &str) -> MyResult<&str, String> {
     alt((parse_quoted_key, parse_unquoted_key))(input)
 }
 
 /// unquoted-key = 1*unquoted-key-char
-fn parse_unquoted_key(input: &str) -> IResult<&str, String> {
+fn parse_unquoted_key(input: &str) -> MyResult<&str, String> {
     map(take_while1(is_unquoted_key_char), &str::to_string)(input)
 }
 
@@ -319,12 +305,12 @@ fn is_unquoted_key_char(c: char) -> bool {
 }
 
 /// quoted-key = basic-string / literal-string
-fn parse_quoted_key(input: &str) -> IResult<&str, String> {
+fn parse_quoted_key(input: &str) -> MyResult<&str, String> {
     alt((parse_basic_string, parse_literal_string))(input)
 }
 
 /// dotted-key = simple-key 1*( dot-sep simple-key )
-fn parse_dotted_key(input: &str) -> IResult<&str, TomlKey> {
+fn parse_dotted_key(input: &str) -> MyResult<&str, TomlKey> {
     let (input, key) = _parse_simple_key(input)?;
     let (input, keys) = many1(preceded(parse_dot_sep, _parse_simple_key))(input)?;
     let output = TomlKey::DottedKey(iter::once(key).chain(keys).collect());
@@ -332,12 +318,12 @@ fn parse_dotted_key(input: &str) -> IResult<&str, TomlKey> {
 }
 
 // dot-sep   = ws %x2E ws  ; . Period
-fn parse_dot_sep(input: &str) -> IResult<&str, &str> {
+fn parse_dot_sep(input: &str) -> MyResult<&str, &str> {
     recognize(tuple((parse_ws, tag("."), parse_ws)))(input)
 }
 
 /// string = ml-basic-string / basic-string / ml-literal-string / literal-string
-fn parse_string(input: &str) -> IResult<&str, TomlValue> {
+fn parse_string(input: &str) -> MyResult<&str, TomlValue> {
     let (input, s) = alt((
         parse_ml_basic_string,
         parse_ml_literal_string,
@@ -349,7 +335,7 @@ fn parse_string(input: &str) -> IResult<&str, TomlValue> {
 
 /// basic-string = quotation-mark *basic-char quotation-mark
 // quotation-mark = %x22            ; "
-fn parse_basic_string(input: &str) -> IResult<&str, String> {
+fn parse_basic_string(input: &str) -> MyResult<&str, String> {
     map(
         delimited(tag("\""), recognize(many0(parse_basic_char)), tag("\"")),
         &str::to_string,
@@ -357,12 +343,12 @@ fn parse_basic_string(input: &str) -> IResult<&str, String> {
 }
 
 /// basic-char = basic-unescaped / escaped
-fn parse_basic_char(input: &str) -> IResult<&str, &str> {
+fn parse_basic_char(input: &str) -> MyResult<&str, &str> {
     alt((parse_basic_unescaped, parse_escaped))(input)
 }
 
 /// basic-unescaped = wschar / %x21 / %x23-5B / %x5D-7E / non-ascii
-fn parse_basic_unescaped(input: &str) -> IResult<&str, &str> {
+fn parse_basic_unescaped(input: &str) -> MyResult<&str, &str> {
     fn is_basic_unescaped(c: char) -> bool {
         matches!(
             c as u32,
@@ -385,7 +371,7 @@ fn parse_basic_unescaped(input: &str) -> IResult<&str, &str> {
 // escape-seq-char =/ %x78 2HEXDIG ; xHH                  U+00HH
 // escape-seq-char =/ %x75 4HEXDIG ; uHHHH                U+HHHH
 // escape-seq-char =/ %x55 8HEXDIG ; UHHHHHHHH            U+HHHHHHHH
-fn parse_escaped(input: &str) -> IResult<&str, &str> {
+fn parse_escaped(input: &str) -> MyResult<&str, &str> {
     alt((
         tag("\\\""),
         tag("\\\\"),
@@ -413,7 +399,7 @@ fn parse_escaped(input: &str) -> IResult<&str, &str> {
 /// ml-basic-string = ml-basic-string-delim [ newline ] ml-basic-body
 ///                   ml-basic-string-delim
 /// ml-basic-string-delim = 3quotation-mark
-fn parse_ml_basic_string(input: &str) -> IResult<&str, String> {
+fn parse_ml_basic_string(input: &str) -> MyResult<&str, String> {
     delimited(
         tuple((tag("\"\"\""), opt(parse_newline))),
         parse_ml_basic_body,
@@ -422,7 +408,7 @@ fn parse_ml_basic_string(input: &str) -> IResult<&str, String> {
 }
 
 /// ml-basic-body = *mlb-content *( mlb-quotes 1*mlb-content ) [ mlb-quotes ]
-fn parse_ml_basic_body(input: &str) -> IResult<&str, String> {
+fn parse_ml_basic_body(input: &str) -> MyResult<&str, String> {
     let (input, content) = many0(parse_mlb_content)(input)?;
     let (input, quotes_content) =
         many0(tuple((parse_mlb_quotes, many1(parse_mlb_content))))(input)?;
@@ -441,7 +427,7 @@ fn parse_ml_basic_body(input: &str) -> IResult<&str, String> {
 }
 
 /// mlb-quotes = 1*2quotation-mark
-fn parse_mlb_quotes(input: &str) -> IResult<&str, &str> {
+fn parse_mlb_quotes(input: &str) -> MyResult<&str, &str> {
     alt((
         recognize(tuple((tag("\""), not(tag("\""))))),
         recognize(tuple((tag("\"\""), not(tag("\""))))),
@@ -452,7 +438,7 @@ fn parse_mlb_quotes(input: &str) -> IResult<&str, &str> {
 
 /// mlb-content = basic-char / newline / mlb-escaped-nl
 /// mlb-escaped-nl = escape ws newline *( wschar / newline )
-fn parse_mlb_content(input: &str) -> IResult<&str, &str> {
+fn parse_mlb_content(input: &str) -> MyResult<&str, &str> {
     let result = alt((parse_basic_char, parse_newline))(input);
     if result.is_ok() {
         return result;
@@ -472,7 +458,7 @@ fn parse_mlb_content(input: &str) -> IResult<&str, &str> {
 /// literal-string = apostrophe *literal-char apostrophe
 ///
 /// apostrophe = %x27 ; ' apostrophe
-fn parse_literal_string(input: &str) -> IResult<&str, String> {
+fn parse_literal_string(input: &str) -> MyResult<&str, String> {
     map(
         delimited(tag("'"), take_while(is_literal_char), tag("'")),
         &str::to_string,
@@ -490,7 +476,7 @@ fn is_literal_char(c: char) -> bool {
 /// ml-literal-string = ml-literal-string-delim [ newline ] ml-literal-body
 ///                     ml-literal-string-delim
 /// ml-literal-string-delim = 3apostrophe
-fn parse_ml_literal_string(input: &str) -> IResult<&str, String> {
+fn parse_ml_literal_string(input: &str) -> MyResult<&str, String> {
     map(
         delimited(
             tuple((tag("'''"), opt(parse_newline))),
@@ -502,7 +488,7 @@ fn parse_ml_literal_string(input: &str) -> IResult<&str, String> {
 }
 
 /// ml-literal-body = *mll-content *( mll-quotes 1*mll-content ) [ mll-quotes ]
-fn parse_ml_literal_body(input: &str) -> IResult<&str, &str> {
+fn parse_ml_literal_body(input: &str) -> MyResult<&str, &str> {
     recognize(tuple((
         many0(parse_mll_content),
         many0(tuple((parse_mll_quotes, many1(parse_mll_content)))),
@@ -511,12 +497,12 @@ fn parse_ml_literal_body(input: &str) -> IResult<&str, &str> {
 }
 
 /// mll-content = literal-char / newline
-fn parse_mll_content(input: &str) -> IResult<&str, &str> {
+fn parse_mll_content(input: &str) -> MyResult<&str, &str> {
     alt((take_while_m_n(1, 1, is_literal_char), parse_newline))(input)
 }
 
 /// mll-quotes = 1*2apostrophe
-fn parse_mll_quotes(input: &str) -> IResult<&str, &str> {
+fn parse_mll_quotes(input: &str) -> MyResult<&str, &str> {
     alt((
         recognize(tuple((tag("'"), not(tag("'"))))),
         recognize(tuple((tag("''"), not(tag("'"))))),
@@ -537,7 +523,7 @@ fn parse_mll_quotes(input: &str) -> IResult<&str, &str> {
 /// hex-prefix = %x30.78               ; 0x
 /// oct-prefix = %x30.6F               ; 0o
 /// bin-prefix = %x30.62               ; 0b
-fn parse_integer(input: &str) -> IResult<&str, TomlValue> {
+fn parse_integer(input: &str) -> MyResult<&str, TomlValue> {
     let (input, n) = alt((
         parse_hex_int,
         parse_oct_int,
@@ -548,7 +534,7 @@ fn parse_integer(input: &str) -> IResult<&str, TomlValue> {
 }
 
 /// dec-int = [ minus / plus ] unsigned-dec-int
-fn parse_dec_int(input: &str) -> IResult<&str, i64> {
+fn parse_dec_int(input: &str) -> MyResult<&str, i64> {
     let (input, sign) = opt(alt((tag("-"), tag("+"))))(input)?;
     let (input, n) = parse_unsigned_dec_int(input)?;
     Ok((
@@ -561,7 +547,7 @@ fn parse_dec_int(input: &str) -> IResult<&str, i64> {
 }
 
 /// unsigned-dec-int = DIGIT / digit1-9 1*( DIGIT / underscore DIGIT )
-fn parse_unsigned_dec_int(input: &str) -> IResult<&str, i64> {
+fn parse_unsigned_dec_int(input: &str) -> MyResult<&str, i64> {
     let parser = alt((
         recognize(tuple((
             one_of("123456789"),
@@ -580,7 +566,7 @@ fn parse_xxx_int<'a>(
     prefix: &str,
     digits: &str,
     radix: u32,
-) -> IResult<&'a str, i64> {
+) -> MyResult<&'a str, i64> {
     let (input, _) = tag(prefix)(input)?;
     let parser = tuple((
         one_of(digits),
@@ -592,17 +578,17 @@ fn parse_xxx_int<'a>(
 }
 
 /// hex-int = hex-prefix HEXDIG *( HEXDIG / underscore HEXDIG )
-fn parse_hex_int(input: &str) -> IResult<&str, i64> {
+fn parse_hex_int(input: &str) -> MyResult<&str, i64> {
     parse_xxx_int(input, "0x", "0123456789ABCDEFabcdef", 16)
 }
 
 /// oct-int = oct-prefix digit0-7 *( digit0-7 / underscore digit0-7 )
-fn parse_oct_int(input: &str) -> IResult<&str, i64> {
+fn parse_oct_int(input: &str) -> MyResult<&str, i64> {
     parse_xxx_int(input, "0o", "01234567", 8)
 }
 
 /// bin-int = bin-prefix digit0-1 *( digit0-1 / underscore digit0-1 )
-fn parse_bin_int(input: &str) -> IResult<&str, i64> {
+fn parse_bin_int(input: &str) -> MyResult<&str, i64> {
     parse_xxx_int(input, "0b", "01", 2)
 }
 
@@ -610,7 +596,7 @@ fn parse_bin_int(input: &str) -> IResult<&str, i64> {
 /// float =/ special-float
 ///
 /// float-int-part = dec-int
-fn parse_float(input: &str) -> IResult<&str, TomlValue> {
+fn parse_float(input: &str) -> MyResult<&str, TomlValue> {
     if let Ok((input, x)) = parse_special_float(input) {
         return Ok((input, TomlValue::Float(x)));
     }
@@ -628,13 +614,13 @@ fn parse_float(input: &str) -> IResult<&str, TomlValue> {
 
 /// frac = decimal-point zero-prefixable-int
 /// decimal-point = %x2E               ; .
-fn parse_frac(input: &str) -> IResult<&str, i64> {
+fn parse_frac(input: &str) -> MyResult<&str, i64> {
     let (input, _) = tag(".")(input)?;
     parse_zero_prefixable_int(input)
 }
 
 /// zero-prefixable-int = DIGIT *( DIGIT / underscore DIGIT )
-fn parse_zero_prefixable_int(input: &str) -> IResult<&str, i64> {
+fn parse_zero_prefixable_int(input: &str) -> MyResult<&str, i64> {
     let parser = tuple((
         one_of("0123456789"),
         many0(alt((
@@ -649,7 +635,7 @@ fn parse_zero_prefixable_int(input: &str) -> IResult<&str, i64> {
 
 /// exp = "e" float-exp-part
 /// float-exp-part = [ minus / plus ] zero-prefixable-int
-fn parse_exp(input: &str) -> IResult<&str, i64> {
+fn parse_exp(input: &str) -> MyResult<&str, i64> {
     let (input, _) = one_of("Ee")(input)?;
     let (input, sign) = opt(alt((tag("-"), tag("+"))))(input)?;
     let (input, n) = parse_zero_prefixable_int(input)?;
@@ -665,7 +651,7 @@ fn parse_exp(input: &str) -> IResult<&str, i64> {
 /// special-float = [ minus / plus ] ( inf / nan )
 /// inf = %x69.6e.66  ; inf
 /// nan = %x6e.61.6e  ; nan
-fn parse_special_float(input: &str) -> IResult<&str, f64> {
+fn parse_special_float(input: &str) -> MyResult<&str, f64> {
     let (input, sign) = opt(alt((tag("-"), tag("+"))))(input)?;
     let (input, value) = alt((tag("inf"), tag("nan")))(input)?;
     Ok((
@@ -684,13 +670,13 @@ fn parse_special_float(input: &str) -> IResult<&str, f64> {
 /// boolean = true / false
 /// true    = %x74.72.75.65     ; true
 /// false   = %x66.61.6C.73.65  ; false
-fn parse_boolean(input: &str) -> IResult<&str, TomlValue> {
+fn parse_boolean(input: &str) -> MyResult<&str, TomlValue> {
     let (input, value) = alt((tag("true"), tag("false")))(input)?;
     Ok((input, TomlValue::Boolean(value == "true")))
 }
 
 /// date-time      = offset-date-time / local-date-time / local-date / local-time
-fn parse_date_time(input: &str) -> IResult<&str, TomlValue> {
+fn parse_date_time(input: &str) -> MyResult<&str, TomlValue> {
     alt((
         parse_offset_date_time,
         parse_local_date_time,
@@ -709,7 +695,7 @@ fn parse_date_time(input: &str) -> IResult<&str, TomlValue> {
 /// time-secfrac   = "." 1*DIGIT
 
 /// partial-time   = time-hour ":" time-minute [ ":" time-second [ time-secfrac ] ]
-fn parse_partial_time(input: &str) -> IResult<&str, &str> {
+fn parse_partial_time(input: &str) -> MyResult<&str, &str> {
     recognize(tuple((
         many_m_n(2, 2, one_of("0123456789")),
         tag(":"),
@@ -723,7 +709,7 @@ fn parse_partial_time(input: &str) -> IResult<&str, &str> {
 }
 
 /// full-date      = date-fullyear "-" date-month "-" date-mday
-fn parse_full_date(input: &str) -> IResult<&str, &str> {
+fn parse_full_date(input: &str) -> MyResult<&str, &str> {
     recognize(tuple((
         many_m_n(4, 4, one_of("0123456789")),
         tag("-"),
@@ -734,7 +720,7 @@ fn parse_full_date(input: &str) -> IResult<&str, &str> {
 }
 
 /// full-time      = partial-time time-offset
-fn parse_full_time(input: &str) -> IResult<&str, &str> {
+fn parse_full_time(input: &str) -> MyResult<&str, &str> {
     // time-numoffset = ( "+" / "-" ) time-hour ":" time-minute
     let parse_time_numoffset = recognize(tuple((
         one_of("+-"),
@@ -750,7 +736,7 @@ fn parse_full_time(input: &str) -> IResult<&str, &str> {
 }
 
 /// offset-date-time = full-date time-delim full-time
-fn parse_offset_date_time(input: &str) -> IResult<&str, TomlValue> {
+fn parse_offset_date_time(input: &str) -> MyResult<&str, TomlValue> {
     map(
         tuple((parse_full_date, one_of("Tt "), parse_full_time)),
         |(full_date, _, full_time)| {
@@ -761,7 +747,7 @@ fn parse_offset_date_time(input: &str) -> IResult<&str, TomlValue> {
 }
 
 /// local-date-time = full-date time-delim partial-time
-fn parse_local_date_time(input: &str) -> IResult<&str, TomlValue> {
+fn parse_local_date_time(input: &str) -> MyResult<&str, TomlValue> {
     map(
         tuple((parse_full_date, one_of("Tt "), parse_partial_time)),
         |(full_date, _, partial_time)| {
@@ -776,14 +762,14 @@ fn parse_local_date_time(input: &str) -> IResult<&str, TomlValue> {
 }
 
 /// local-date = full-date
-fn parse_local_date(input: &str) -> IResult<&str, TomlValue> {
+fn parse_local_date(input: &str) -> MyResult<&str, TomlValue> {
     map(parse_full_date, |s| {
         TomlValue::LocalDate(NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap())
     })(input)
 }
 
 /// local-time = partial-time
-fn parse_local_time(input: &str) -> IResult<&str, TomlValue> {
+fn parse_local_time(input: &str) -> MyResult<&str, TomlValue> {
     map(parse_partial_time, |s| {
         TomlValue::LocalTime(NaiveTime::parse_from_str(s, "%H:%M:%S%.f").unwrap())
     })(input)
@@ -793,7 +779,7 @@ fn parse_local_time(input: &str) -> IResult<&str, TomlValue> {
 ///
 /// array-open =  %x5B ; [
 /// array-close = %x5D ; ]
-fn parse_array(input: &str) -> IResult<&str, TomlValue> {
+fn parse_array(input: &str) -> MyResult<&str, TomlValue> {
     map(
         delimited(
             tag("["),
@@ -808,7 +794,7 @@ fn parse_array(input: &str) -> IResult<&str, TomlValue> {
 /// array-values =/ ws-comment-newline val ws-comment-newline [ array-sep ]
 ///
 /// array-sep = %x2C  ; , Comma
-fn parse_array_values(input: &str) -> IResult<&str, Vec<TomlValue>> {
+fn parse_array_values(input: &str) -> MyResult<&str, Vec<TomlValue>> {
     let parse_array_value = delimited(
         parse_ws_comment_newline,
         parse_val,
@@ -818,7 +804,7 @@ fn parse_array_values(input: &str) -> IResult<&str, Vec<TomlValue>> {
 }
 
 /// ws-comment-newline = *( wschar / [ comment ] newline )
-fn parse_ws_comment_newline(input: &str) -> IResult<&str, &str> {
+fn parse_ws_comment_newline(input: &str) -> MyResult<&str, &str> {
     recognize(many0(alt((
         recognize(one_of(" \t")),
         recognize(tuple((opt(parse_comment), parse_newline))),
@@ -826,7 +812,7 @@ fn parse_ws_comment_newline(input: &str) -> IResult<&str, &str> {
 }
 
 /// table = std-table / array-table
-fn parse_table(input: &str) -> IResult<&str, TomlExpression> {
+fn parse_table(input: &str) -> MyResult<&str, TomlExpression> {
     alt((parse_std_table, parse_array_table))(input)
 }
 
@@ -834,7 +820,7 @@ fn parse_table(input: &str) -> IResult<&str, TomlExpression> {
 ///
 /// std-table-open  = %x5B ws     ; [ Left square bracket
 /// std-table-close = ws %x5D     ; ] Right square bracket
-fn parse_std_table(input: &str) -> IResult<&str, TomlExpression> {
+fn parse_std_table(input: &str) -> MyResult<&str, TomlExpression> {
     map(
         delimited(tag("["), parse_key, tuple((parse_ws, tag("]")))),
         TomlExpression::StdTable,
@@ -846,7 +832,7 @@ fn parse_std_table(input: &str) -> IResult<&str, TomlExpression> {
 /// inline-table-open  = %x7B  ; {
 /// inline-table-close = %x7D  ; }
 /// inline-table-sep   = %x2C  ; , Comma
-fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
+fn parse_inline_table(input: &str) -> MyResult<&str, TomlValue> {
     map(
         delimited(
             tag("{"),
@@ -859,25 +845,24 @@ fn parse_inline_table(input: &str) -> IResult<&str, TomlValue> {
 
 /// inline-table-keyvals =  ws-comment-newline keyval ws-comment-newline inline-table-sep inline-table-keyvals
 /// inline-table-keyvals =/ ws-comment-newline keyval ws-comment-newline [ inline-table-sep ]
-fn parse_inline_table_keyvals(input: &str) -> IResult<&str, HashMap<String, TomlValue>> {
+fn parse_inline_table_keyvals(input: &str) -> MyResult<&str, HashMap<String, TomlValue>> {
     let parse_inline_table_keyval = delimited(
         parse_ws_comment_newline,
         _parse_keyval,
         tuple((parse_ws_comment_newline, opt(tag(",")))),
     );
-    map(many1(parse_inline_table_keyval), |v| {
-        let mut result = HashMap::new();
-        for (k, v) in v {
-            add_to_toml(&mut result, k, v).unwrap();
-        }
-        result
-    })(input)
+    let (input, v) = many1(parse_inline_table_keyval)(input)?;
+    let mut result = HashMap::new();
+    for (k, v) in v {
+        add_to_toml(&mut result, k, v)?;
+    }
+    Ok((input, result))
 }
 
 /// array-table = array-table-open key array-table-close
 /// array-table-open  = %x5B.5B ws  ; [[ Double left square bracket
 /// array-table-close = ws %x5D.5D  ; ]] Double right square bracket
-fn parse_array_table(input: &str) -> IResult<&str, TomlExpression> {
+fn parse_array_table(input: &str) -> MyResult<&str, TomlExpression> {
     map(
         delimited(tag("[["), parse_key, tuple((parse_ws, tag("]]")))),
         TomlExpression::ArrayTable,
@@ -1509,16 +1494,19 @@ mod tests {
             key2 = 456
             "#
             ),
-            Ok(hashmap! {
-                "table-1".to_string() => TomlValue::Table(hashmap!{
-                    "key1".to_string() => TomlValue::String("some string".to_string()),
-                    "key2".to_string() => TomlValue::Integer(123)
-                }),
-                "table_2".to_string() => TomlValue::Table(hashmap!{
-                    "key1".to_string() => TomlValue::String("another string".to_string()),
-                    "key2".to_string() => TomlValue::Integer(456)
-                })
-            })
+            Ok((
+                "",
+                hashmap! {
+                    "table-1".to_string() => TomlValue::Table(hashmap!{
+                        "key1".to_string() => TomlValue::String("some string".to_string()),
+                        "key2".to_string() => TomlValue::Integer(123)
+                    }),
+                    "table_2".to_string() => TomlValue::Table(hashmap!{
+                        "key1".to_string() => TomlValue::String("another string".to_string()),
+                        "key2".to_string() => TomlValue::Integer(456)
+                    })
+                }
+            ))
         );
         assert_eq!(
             parse_toml(
@@ -1527,15 +1515,18 @@ mod tests {
             type.name = "pug"
             "#
             ),
-            Ok(hashmap! {
-                "dog".to_string() => TomlValue::Table(hashmap!{
-                    "tater.man".to_string() => TomlValue::Table(hashmap!{
-                        "type".to_string() => TomlValue::Table(hashmap!{
-                            "name".to_string() => TomlValue::String("pug".to_string())
+            Ok((
+                "",
+                hashmap! {
+                    "dog".to_string() => TomlValue::Table(hashmap!{
+                        "tater.man".to_string() => TomlValue::Table(hashmap!{
+                            "type".to_string() => TomlValue::Table(hashmap!{
+                                "name".to_string() => TomlValue::String("pug".to_string())
+                            })
                         })
                     })
-                })
-            })
+                }
+            ))
         )
     }
 
@@ -1557,20 +1548,23 @@ mod tests {
             color = "gray"
             "#
             ),
-            Ok(hashmap! {
-                "products".to_string() => TomlValue::ArrayTable(vec![
-                    hashmap!{
-                        "name".to_string() => TomlValue::String("Hammer".to_string()),
-                        "sku".to_string() => TomlValue::Integer(738594937)
-                    },
-                    hashmap!{},
-                    hashmap!{
-                        "name".to_string() => TomlValue::String("Nail".to_string()),
-                        "sku".to_string() => TomlValue::Integer(284758393),
-                        "color".to_string() => TomlValue::String("gray".to_string())
-                    }
-                ])
-            })
+            Ok((
+                "",
+                hashmap! {
+                    "products".to_string() => TomlValue::ArrayTable(vec![
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("Hammer".to_string()),
+                            "sku".to_string() => TomlValue::Integer(738594937)
+                        },
+                        hashmap!{},
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("Nail".to_string()),
+                            "sku".to_string() => TomlValue::Integer(284758393),
+                            "color".to_string() => TomlValue::String("gray".to_string())
+                        }
+                    ])
+                }
+            ))
         )
     }
 
@@ -1599,33 +1593,36 @@ mod tests {
                 name = "plantain"
             "#
             ),
-            Ok(hashmap! {
-                "fruit".to_string() => TomlValue::ArrayTable(vec![
-                    hashmap!{
-                        "name".to_string() => TomlValue::String("apple".to_string()),
-                        "physical".to_string() => TomlValue::Table(hashmap!{
-                            "color".to_string() => TomlValue::String("red".to_string()),
-                            "shape".to_string() => TomlValue::String("round".to_string())
-                        }),
-                        "variety".to_string() => TomlValue::ArrayTable(vec![
-                            hashmap!{
-                                "name".to_string() => TomlValue::String("red delicious".to_string())
-                            },
-                            hashmap!{
-                                "name".to_string() => TomlValue::String("granny smith".to_string())
-                            }
-                        ])
-                    },
-                    hashmap!{
-                        "name".to_string() => TomlValue::String("banana".to_string()),
-                        "variety".to_string() => TomlValue::ArrayTable(vec![
-                            hashmap!{
-                                "name".to_string() => TomlValue::String("plantain".to_string())
-                            }
-                        ])
-                    }
-                ])
-            })
+            Ok((
+                "",
+                hashmap! {
+                    "fruit".to_string() => TomlValue::ArrayTable(vec![
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("apple".to_string()),
+                            "physical".to_string() => TomlValue::Table(hashmap!{
+                                "color".to_string() => TomlValue::String("red".to_string()),
+                                "shape".to_string() => TomlValue::String("round".to_string())
+                            }),
+                            "variety".to_string() => TomlValue::ArrayTable(vec![
+                                hashmap!{
+                                    "name".to_string() => TomlValue::String("red delicious".to_string())
+                                },
+                                hashmap!{
+                                    "name".to_string() => TomlValue::String("granny smith".to_string())
+                                }
+                            ])
+                        },
+                        hashmap!{
+                            "name".to_string() => TomlValue::String("banana".to_string()),
+                            "variety".to_string() => TomlValue::ArrayTable(vec![
+                                hashmap!{
+                                    "name".to_string() => TomlValue::String("plantain".to_string())
+                                }
+                            ])
+                        }
+                    ])
+                }
+            ))
         )
     }
 
@@ -1645,9 +1642,9 @@ mod tests {
                 name = "Pradyun"
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key name is already defined".to_string()
-            ))
+            )))
         );
     }
 
@@ -1660,9 +1657,9 @@ mod tests {
                 "spelling" = "favourite"
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key spelling is already defined".to_string()
-            ))
+            )))
         );
     }
 
@@ -1675,9 +1672,9 @@ mod tests {
                 fruit.apple.smooth = true
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key fruit.apple is already defined".to_string()
-            ))
+            )))
         );
     }
 
@@ -1693,9 +1690,9 @@ mod tests {
                 c = 2
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key a is already defined".to_string()
-            ))
+            )))
         );
         assert_eq!(
             parse_toml(
@@ -1707,9 +1704,9 @@ mod tests {
                 c = 2
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key a.b is already defined".to_string()
-            ))
+            )))
         );
         assert_eq!(
             parse_toml(
@@ -1721,9 +1718,9 @@ mod tests {
                 [fruit.apple]
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key fruit.apple is already defined".to_string()
-            ))
+            )))
         );
         assert_eq!(
             parse_toml(
@@ -1735,9 +1732,9 @@ mod tests {
                 [fruit.apple.taste]
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key fruit.apple.taste is already defined".to_string()
-            ))
+            )))
         );
     }
 
@@ -1751,9 +1748,9 @@ mod tests {
                 type.edible = false
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key type is already defined".to_string()
-            ))
+            )))
         );
         assert_eq!(
             parse_toml(
@@ -1763,9 +1760,9 @@ mod tests {
                 type = { edible = false }
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key type is already defined".to_string()
-            ))
+            )))
         );
     }
 
@@ -1782,9 +1779,9 @@ mod tests {
                 name = "apple"
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key fruit is already defined".to_string()
-            ))
+            )))
         );
     }
 
@@ -1798,9 +1795,9 @@ mod tests {
                 [[fruit]]
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key fruit is already defined".to_string()
-            ))
+            )))
         );
     }
 
@@ -1819,9 +1816,9 @@ mod tests {
                 name = "granny smith"
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key fruit.variety is already defined".to_string()
-            ))
+            )))
         );
     }
 
@@ -1838,9 +1835,19 @@ mod tests {
                 color = "green"
                 "#,
             ),
-            Err(TomlParserError::DuplicationError(
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
                 "key fruit.physical is already defined".to_string()
-            ))
+            )))
         );
+    }
+
+    #[test]
+    fn test_duplicated_keys_in_inline_table() {
+        assert_eq!(
+            parse_toml("inline_table = { a = 1, a = 2 }"),
+            Err(nom::Err::Failure(TomlParserError::DuplicationError(
+                "key a is already defined".to_string()
+            )))
+        )
     }
 }
