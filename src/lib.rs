@@ -3,7 +3,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1, take_while_m_n},
     character::complete::{line_ending, one_of, space0},
-    combinator::{cut, map, not, opt, peek, recognize},
+    combinator::{map, not, opt, peek, recognize},
     error::{ErrorKind, ParseError},
     multi::{many0, many1, many_m_n},
     sequence::{delimited, preceded, separated_pair, terminated, tuple},
@@ -44,6 +44,7 @@ enum TomlExpression {
 pub enum TomlParserError {
     NomError(String, nom::error::ErrorKind),
     DuplicationError(String),
+    IncompleteError(String),
 }
 
 impl ParseError<&str> for TomlParserError {
@@ -79,24 +80,21 @@ pub fn parse_toml(input: &str) -> MyResult<&str, HashMap<String, TomlValue>> {
                 input
             }
             Err(nom::Err::Failure(e)) => {
-                return Err(nom::Err::Failure(e))?;
+                return Err(nom::Err::Failure(e));
             }
-            Err(e) => {
-                println!("Error: {:?}", e);
+            Err(_) => {
                 break;
             }
         };
     }
 
-    // inputが空文字列でない場合はエラーとする
-    // ToDo: 一部のケースでは、cut を使って nom::error::Failure を使えば普通のパーサーエラーに出来そう
     if input.is_empty() {
         Ok((input, toml))
     } else {
-        Err(nom::Err::Failure(TomlParserError::NomError(
+        // inputが空文字列でない場合はエラーとする
+        Err(nom::Err::Failure(TomlParserError::IncompleteError(
             input.to_string(),
-            ErrorKind::Eof,
-        )))?
+        )))
     }
 }
 
@@ -238,7 +236,7 @@ fn parse_keyval(input: &str) -> MyResult<&str, TomlExpression> {
 }
 
 fn _parse_keyval(input: &str) -> MyResult<&str, (TomlKey, TomlValue)> {
-    separated_pair(parse_key, parse_keyval_sep, cut(parse_val))(input)
+    separated_pair(parse_key, parse_keyval_sep, parse_val)(input)
 }
 
 // keyval-sep = ws %x3D ws ; =
