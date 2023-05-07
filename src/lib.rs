@@ -227,7 +227,7 @@ fn parse_comment(input: &str) -> MyResult<&str, &str> {
     recognize(tuple((
         tag("#"),
         take_while(
-            |c| matches!(c as u32, 0x01..=0x09 | 0x0E..=0x7F | 0x80..=0xD7FF | 0xE000..=0x10FFFF),
+            |c| matches!(c, '\u{01}'..='\u{09}' | '\u{0E}'..='\u{7F}' | '\u{80}'..='\u{D7FF}' | '\u{E000}'..='\u{10FFFF}'),
         ),
     )))(input)
 }
@@ -291,16 +291,16 @@ fn parse_unquoted_key(input: &str) -> MyResult<&str, String> {
 /// unquoted-key-char =/ %x10000-EFFFF                      ; all chars outside BMP range, excluding Private Use planes (F0000-10FFFF)
 fn is_unquoted_key_char(c: char) -> bool {
     matches!(
-        c as u32,
-        0x61..=0x7A | 0x41..=0x5A | 0x30..=0x39 | 0x2D | 0x5F | // a-z A-Z 0-9 - _
-        0xB2 | 0xB3 | 0xB9 | 0xBC..=0xBE | // superscript digits, fractions
-        0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0x37D | // non-symbol chars in Latin block
-        0x37F..=0x1FFF | // exclude GREEK QUESTION MARK, which is basically a semi-colon
-        0x200C..=0x200D | 0x203F..=0x2040 | // from General Punctuation Block, include the two tie symbols and ZWNJ, ZWJ
-        0x2070..=0x218F | 0x2460..=0x24FF | // include super-/subscripts, letterlike/numberlike forms, enclosed alphanumerics
-        0x2C00..=0x2FEF | 0x3001..=0xD7FF | // skip arrows, math, box drawing etc, skip 2FF0-3000 ideographic up/down markers and spaces
-        0xF900..=0xFDCF | 0xFDF0..=0xFFFD | // skip D800-DFFF surrogate block, E000-F8FF Private Use area, FDD0-FDEF intended for process-internal use (unicode)
-        0x10000..=0xEFFFF // all chars outside BMP range, excluding Private Use planes (F0000-10FFFF)
+        c,
+        '\u{61}'..='\u{7A}' | '\u{41}'..='\u{5A}' | '\u{30}'..='\u{39}' | '\u{2D}' | '\u{5F}' | // a-z A-Z 0-9 - _
+        '\u{B2}' | '\u{B3}' | '\u{B9}' | '\u{BC}'..='\u{BE}' | // superscript digits, fractions
+        '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{37D}' | // non-symbol chars in Latin block
+        '\u{37F}'..='\u{1FFF}' | // exclude GREEK QUESTION MARK, which is basically a semi-colon
+        '\u{200C}'..='\u{200D}' | '\u{203F}'..='\u{2040}' | // from General Punctuation Block, include the two tie symbols and ZWNJ, ZWJ
+        '\u{2070}'..='\u{218F}' | '\u{2460}'..='\u{24FF}' | // include super-/subscripts, letterlike/numberlike forms, enclosed alphanumerics
+        '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}' | // skip arrows, math, box drawing etc, skip 2FF0-3000 ideographic up/down markers and spaces
+        '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | // skip D800-DFFF surrogate block, E000-F8FF Private Use area, FDD0-FDEF intended for process-internal use (unicode)
+        '\u{10000}'..='\u{EFFFF}' // all chars outside BMP range, excluding Private Use planes (F0000-10FFFF)
     )
 }
 
@@ -350,10 +350,7 @@ fn parse_basic_char(input: &str) -> MyResult<&str, &str> {
 /// basic-unescaped = wschar / %x21 / %x23-5B / %x5D-7E / non-ascii
 fn parse_basic_unescaped(input: &str) -> MyResult<&str, &str> {
     fn is_basic_unescaped(c: char) -> bool {
-        matches!(
-            c as u32,
-            0x09 | 0x20..=0x21 | 0x23..=0x5B | 0x5D..=0x7E | 0x80..=0xD7FF | 0xE000..=0x10FFFF
-        )
+        matches!(c, '\u{09}' | '\u{20}'..='\u{21}' | '\u{23}'..='\u{5B}' | '\u{5D}'..='\u{7E}' | '\u{80}'..='\u{D7FF}' | '\u{E000}'..='\u{10FFFF}')
     }
     take_while_m_n(1, 1, is_basic_unescaped)(input)
 }
@@ -467,10 +464,7 @@ fn parse_literal_string(input: &str) -> MyResult<&str, String> {
 
 /// literal-char = %x09 / %x20-26 / %x28-7E / non-ascii
 fn is_literal_char(c: char) -> bool {
-    matches!(
-        c as u32,
-        0x09 | 0x20..=0x26 | 0x28..=0x7E | 0x80..=0xD7FF | 0xE000..=0x10FFFF
-    )
+    matches!(c, '\u{09}' | '\u{20}'..='\u{26}' | '\u{28}'..='\u{7E}' | '\u{80}'..='\u{D7FF}' | '\u{E000}'..='\u{10FFFF}')
 }
 
 /// ml-literal-string = ml-literal-string-delim [ newline ] ml-literal-body
