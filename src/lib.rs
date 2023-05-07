@@ -104,17 +104,55 @@ fn add_expression_to_toml(
 ) -> Result<&mut HashMap<String, TomlValue>, nom::Err<TomlParserError>> {
     match exp {
         TomlExpression::KeyVal((key, value)) => {
-            add_to_toml(toml, key, value)?;
+            add_keyval_to_toml(toml, key, value)?;
             Ok(toml)
         }
-        TomlExpression::StdTable(key) => add_to_toml(toml, key, TomlValue::Table(HashMap::new())),
+        TomlExpression::StdTable(key) => {
+            add_keyval_to_toml(toml, key, TomlValue::Table(HashMap::new()))
+        }
         TomlExpression::ArrayTable(key) => {
-            add_to_toml(toml, key, TomlValue::ArrayTable(vec![HashMap::new()]))
+            add_keyval_to_toml(toml, key, TomlValue::ArrayTable(vec![HashMap::new()]))
         }
     }
 }
 
-fn _add_to_toml(
+fn add_keyval_to_toml(
+    toml: &mut HashMap<String, TomlValue>,
+    key: TomlKey,
+    value: TomlValue,
+) -> Result<&mut HashMap<String, TomlValue>, nom::Err<TomlParserError>> {
+    let allow_array_table = matches!(value, TomlValue::Table(_) | TomlValue::ArrayTable(_));
+    match key {
+        TomlKey::SimpleKey(key) => add_simple_keyval_to_toml(toml, key, value),
+        TomlKey::DottedKey(keys) => {
+            let mut current = toml;
+            let mut subkey = Vec::new();
+            for k in keys[..keys.len() - 1].iter() {
+                subkey.push(k.clone());
+                current
+                    .entry(k.clone())
+                    .or_insert_with(|| TomlValue::Table(HashMap::new()));
+                current = match current.get_mut(k) {
+                    Some(TomlValue::Table(t)) => t,
+                    Some(TomlValue::ArrayTable(v)) if allow_array_table => v.last_mut().unwrap(),
+                    _ => {
+                        return Err(nom::Err::Failure(TomlParserError::DuplicationError(
+                            format!("key {} is already defined", subkey.join(".")),
+                        )));
+                    }
+                };
+            }
+            match add_simple_keyval_to_toml(current, keys.last().unwrap().clone(), value) {
+                Ok(t) => Ok(t),
+                Err(_) => Err(nom::Err::Failure(TomlParserError::DuplicationError(
+                    format!("key {} is already defined", keys.join(".")),
+                ))),
+            }
+        }
+    }
+}
+
+fn add_simple_keyval_to_toml(
     toml: &mut HashMap<String, TomlValue>,
     key: String,
     value: TomlValue,
@@ -149,42 +187,6 @@ fn _add_to_toml(
         (false, value) => {
             toml.insert(key, value);
             Ok(toml)
-        }
-    }
-}
-
-fn add_to_toml(
-    toml: &mut HashMap<String, TomlValue>,
-    key: TomlKey,
-    value: TomlValue,
-) -> Result<&mut HashMap<String, TomlValue>, nom::Err<TomlParserError>> {
-    let allow_array_table = matches!(value, TomlValue::Table(_) | TomlValue::ArrayTable(_));
-    match key {
-        TomlKey::SimpleKey(key) => _add_to_toml(toml, key, value),
-        TomlKey::DottedKey(keys) => {
-            let mut current = toml;
-            let mut subkey = Vec::new();
-            for k in keys[..keys.len() - 1].iter() {
-                subkey.push(k.clone());
-                current
-                    .entry(k.clone())
-                    .or_insert_with(|| TomlValue::Table(HashMap::new()));
-                current = match current.get_mut(k) {
-                    Some(TomlValue::Table(t)) => t,
-                    Some(TomlValue::ArrayTable(v)) if allow_array_table => v.last_mut().unwrap(),
-                    _ => {
-                        return Err(nom::Err::Failure(TomlParserError::DuplicationError(
-                            format!("key {} is already defined", subkey.join(".")),
-                        )));
-                    }
-                };
-            }
-            match _add_to_toml(current, keys.last().unwrap().clone(), value) {
-                Ok(t) => Ok(t),
-                Err(_) => Err(nom::Err::Failure(TomlParserError::DuplicationError(
-                    format!("key {} is already defined", keys.join(".")),
-                ))),
-            }
         }
     }
 }
@@ -852,7 +854,7 @@ fn parse_inline_table_keyvals(input: &str) -> MyResult<&str, HashMap<String, Tom
     let (input, v) = many1(parse_inline_table_keyval)(input)?;
     let mut result = HashMap::new();
     for (k, v) in v {
-        add_to_toml(&mut result, k, v)?;
+        add_keyval_to_toml(&mut result, k, v)?;
     }
     Ok((input, result))
 }
