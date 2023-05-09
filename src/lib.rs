@@ -44,7 +44,7 @@ enum TomlExpression {
 pub enum TomlParserError {
     NomError(String, nom::error::ErrorKind),
     DuplicationError(String),
-    IncompleteError(String),
+    InvalidTomlError(String),
 }
 
 impl ParseError<&str> for TomlParserError {
@@ -92,7 +92,7 @@ pub fn parse_toml(input: &str) -> MyResult<&str, HashMap<String, TomlValue>> {
         Ok((input, toml))
     } else {
         // inputが空文字列でない場合はエラーとする
-        Err(nom::Err::Failure(TomlParserError::IncompleteError(
+        Err(nom::Err::Failure(TomlParserError::InvalidTomlError(
             input.to_string(),
         )))
     }
